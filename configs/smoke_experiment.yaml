@@ -1,0 +1,13 @@
+experiment:
+  name: smoke_neat_racer
+  seed: 3
+runtime:
+  max_generations: 2
+simulation:
+  max_steps_per_episode: 250
+neat:
+  population_size: 18
+analysis:
+  enabled_post_train: false
+logging:
+  save_per_step: false

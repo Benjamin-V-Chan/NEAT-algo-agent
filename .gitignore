@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# NEAT Racer outputs
+outputs/*
+!outputs/.gitkeep
+saved_artifacts/*
+!saved_artifacts/.gitkeep

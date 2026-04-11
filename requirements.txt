@@ -1,0 +1,8 @@
+numpy>=1.26
+pandas>=2.2
+matplotlib>=3.8
+PyYAML>=6.0
+neat-python>=0.92
+pygame>=2.6
+pyarrow>=15.0
+pytest>=8.0

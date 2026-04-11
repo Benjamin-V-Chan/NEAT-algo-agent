@@ -1,0 +1,103 @@
+experiment:
+  name: baseline_neat_racer
+  description: "Baseline NEAT racing run"
+  seed: 7
+
+runtime:
+  mode: headless
+  deterministic: true
+  max_generations: 40
+  evaluate_laps_required: 1
+  realtime_speed: 1.0
+
+simulation:
+  dt: 0.05
+  max_steps_per_episode: 1800
+  track_file: tracks/baseline_loop.json
+
+car:
+  wheelbase: 22.0
+  collision_radius: 7.5
+  max_speed: 240.0
+  acceleration_max: 120.0
+  braking_max: 180.0
+  drag_coeff: 0.02
+  rolling_coeff: 1.0
+  max_steer_angle_deg: 34.0
+  steer_speed_decay: 0.55
+  min_steer_gain: 0.2
+
+sensors:
+  angles_deg: [-80, -45, -20, -8, 0, 8, 20, 45, 80]
+  max_range: 180.0
+  include_alignment_feature: true
+
+termination:
+  stagnation_window_steps: 160
+  min_progress_delta: 0.015
+  max_reverse_steps: 40
+  max_spin_window_steps: 120
+  spin_angular_velocity_threshold: 6.0
+  max_wall_contacts: 16
+
+progress:
+  checkpoint_radius: 10.0
+  require_start_finish_after_checkpoints: true
+
+fitness:
+  early:
+    w_progress: 900.0
+    w_checkpoint: 120.0
+    w_lap: 600.0
+    w_speed: 0.25
+    w_time: 0.2
+    w_collision: 250.0
+    w_stall: 40.0
+    w_instability: 6.0
+    w_offline: 18.0
+    w_completion_bonus: 450.0
+    w_best_lap_bonus: 120.0
+  late:
+    w_progress: 500.0
+    w_checkpoint: 100.0
+    w_lap: 780.0
+    w_speed: 0.75
+    w_time: 0.45
+    w_collision: 280.0
+    w_stall: 35.0
+    w_instability: 9.0
+    w_offline: 22.0
+    w_completion_bonus: 650.0
+    w_best_lap_bonus: 260.0
+  completion_rate_target: 0.35
+  completion_rate_ema_alpha: 0.25
+
+neat:
+  population_size: 120
+  config_file: configs/neat_config.ini
+  activation_default: tanh
+  hidden_nodes: 0
+  survival_threshold: 0.2
+  reset_on_extinction: true
+
+logging:
+  output_root: outputs
+  save_per_step: false
+  per_step_format: parquet
+  per_step_compression: snappy
+
+rendering:
+  enabled: false
+  width: 1400
+  height: 900
+  hud_panel_width: 360
+  draw_sensors: true
+  draw_checkpoints: true
+
+analysis:
+  enabled_post_train: true
+  crash_heatmap_bins: 36
+
+replay:
+  fps: 60
+  save_trajectory: true
