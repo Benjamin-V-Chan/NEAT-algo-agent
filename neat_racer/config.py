@@ -44,6 +44,8 @@ class CarSection:
     max_steer_angle_deg: float = 34.0
     steer_speed_decay: float = 0.55
     min_steer_gain: float = 0.2
+    # Fraction of speed retained when the car scrapes a wall (0 = full stop).
+    collision_speed_retain: float = 0.35
 
 
 @dataclass(slots=True)
@@ -59,7 +61,6 @@ class SensorSection:
 class TerminationSection:
     stagnation_window_steps: int = 160
     min_progress_delta: float = 0.015
-    max_reverse_steps: int = 40
     max_spin_window_steps: int = 120
     spin_angular_velocity_threshold: float = 6.0
     max_wall_contacts: int = 16
@@ -111,7 +112,6 @@ class FitnessSection:
 @dataclass(slots=True)
 class NeatSection:
     population_size: int = 120
-    config_file: str = "configs/neat_config.ini"
     activation_default: str = "tanh"
     hidden_nodes: int = 0
     survival_threshold: float = 0.2

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 
@@ -112,9 +112,19 @@ def run_episode(
 
         step = integrate_car_step(car, control, cfg.car, dt)
 
+        # Wall-contact model: touching a wall is not instantly fatal. Each new
+        # contact (rising edge) counts against a budget; while in contact the car
+        # is pushed back to its last valid position and bleeds speed. The episode
+        # ends only when the contact budget is exhausted (see TerminationManager).
         collision_flag = track.collision_at(car.pos, cfg.car.collision_radius)
         if collision_flag:
-            car.wall_contacts += 1
+            if not car.in_contact:
+                car.wall_contacts += 1
+            car.in_contact = True
+            car.pos = step.prev_pos.copy()
+            car.speed *= cfg.car.collision_speed_retain
+        else:
+            car.in_contact = False
 
         current_progress, progress_events = update_progress(
             track,
@@ -234,14 +244,12 @@ def run_episode(
 
         last_progress = current_progress
 
-        if collision_flag:
-            car.crashed = True
-            car.alive = False
-            crash_x, crash_y = float(car.pos[0]), float(car.pos[1])
-
         term_result = termination.update(car, current_progress)
         if term_result.done:
             car.alive = False
+            if term_result.reason == "too_many_wall_contacts":
+                car.crashed = True
+                crash_x, crash_y = float(car.pos[0]), float(car.pos[1])
             events.append(
                 {
                     "generation": generation,

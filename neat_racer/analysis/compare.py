@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import matplotlib
 import pandas as pd
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 def compare_runs(run_dirs: list[str], output_path: str | None = None) -> pd.DataFrame:
@@ -21,13 +24,14 @@ def compare_runs(run_dirs: list[str], output_path: str | None = None) -> pd.Data
         if gen.empty:
             continue
 
-        best_row = gen.iloc[gen["best_fitness"].idxmax()]
         rows.append(
             {
                 "run_dir": str(run_dir),
                 "max_best_fitness": float(gen["best_fitness"].max()),
                 "max_mean_fitness": float(gen["mean_fitness"].max()),
-                "best_lap_time": float(gen["best_lap_time"].dropna().min()) if gen["best_lap_time"].notna().any() else None,
+                "best_lap_time": (
+                    float(gen["best_lap_time"].dropna().min()) if gen["best_lap_time"].notna().any() else None
+                ),
                 "first_completion_gen": int(gen[gen["completion_rate"] > 0]["generation"].min())
                 if (gen["completion_rate"] > 0).any()
                 else None,

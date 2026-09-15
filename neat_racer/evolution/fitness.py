@@ -23,7 +23,7 @@ class ActiveFitnessWeights:
     w_best_lap_bonus: float
 
     @classmethod
-    def from_weights(cls, w: FitnessWeights) -> "ActiveFitnessWeights":
+    def from_weights(cls, w: FitnessWeights) -> ActiveFitnessWeights:
         return cls(**asdict(w))
 
 

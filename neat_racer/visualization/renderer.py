@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import math
 
 import numpy as np
 
@@ -37,7 +37,13 @@ class LiveRenderer:
         self.panel_x = cfg.width - cfg.hud_panel_width
 
     def initialize(self, track: Track) -> None:
-        import pygame
+        try:
+            import pygame
+        except ImportError as exc:  # pragma: no cover - depends on optional extra
+            raise RuntimeError(
+                "Live rendering requires the optional 'viz' extra. "
+                "Install it with:  pip install -e '.[viz]'"
+            ) from exc
 
         pygame.init()
         pygame.display.set_caption("NEAT Racer")
@@ -156,7 +162,8 @@ class LiveRenderer:
         if sensors is None:
             return
 
-        for d, angle_deg in zip(sensors, self.metrics_bus.car_metrics.get("sensor_angles_deg", [])):
+        angles = self.metrics_bus.car_metrics.get("sensor_angles_deg", [])
+        for d, angle_deg in zip(sensors, angles, strict=False):
             ray_theta = car.heading + math.radians(angle_deg)
             length = float(d) * self.metrics_bus.car_metrics.get("sensor_max_range", 100.0)
             end = car.pos + np.array([math.cos(ray_theta), math.sin(ray_theta)]) * length
@@ -182,7 +189,10 @@ class LiveRenderer:
             f"Median fit: {snapshot['generation'].get('median_fitness', 0):.2f}",
             f"Crash count: {snapshot['generation'].get('crash_count', 0)}",
             f"Speed: {snapshot['car'].get('speed', 0):.2f}",
-            f"Steer/T/B: {snapshot['car'].get('steer', 0):.2f} / {snapshot['car'].get('throttle', 0):.2f} / {snapshot['car'].get('brake', 0):.2f}",
+            (
+                f"Steer/T/B: {snapshot['car'].get('steer', 0):.2f} / "
+                f"{snapshot['car'].get('throttle', 0):.2f} / {snapshot['car'].get('brake', 0):.2f}"
+            ),
             f"Checkpoint: {snapshot['car'].get('checkpoint', 0)}",
             f"Lap: {snapshot['car'].get('lap', 0)}",
             f"Sim speed: x{self.controls.speed_multiplier:.2f}",

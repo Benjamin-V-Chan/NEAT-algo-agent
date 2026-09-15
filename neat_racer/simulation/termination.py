@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections import deque
+from dataclasses import dataclass
 
 from neat_racer.config import TerminationSection
 from neat_racer.simulation.car import CarState
@@ -20,7 +20,6 @@ class TerminationManager:
         self.cfg = cfg
         self.progress_window: deque[float] = deque(maxlen=cfg.stagnation_window_steps)
         self.yaw_window: deque[float] = deque(maxlen=cfg.max_spin_window_steps)
-        self.reverse_steps = 0
 
     def update(self, car: CarState, progress_scalar: float) -> TerminationResult:
         self.progress_window.append(progress_scalar)
@@ -37,9 +36,6 @@ class TerminationManager:
 
         if self._is_spinning():
             return TerminationResult(done=True, reason="spin_detected")
-
-        if self.reverse_steps > self.cfg.max_reverse_steps:
-            return TerminationResult(done=True, reason="reverse_limit")
 
         return TerminationResult(done=False)
 

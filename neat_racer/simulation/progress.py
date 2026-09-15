@@ -49,22 +49,20 @@ def update_progress(
 
     lap_completed_now = False
     crossed_start, _ = segment_intersection(prev_pos, curr_pos, track.start_finish[0], track.start_finish[1])
-    if crossed_start and (
-        not cfg.require_start_finish_after_checkpoints or progress_state.ready_for_finish
-    ):
-        if progress_state.ready_for_finish:
-            lap_completed_now = True
-            progress_state.laps_completed += 1
-            lap_time = sim_time - progress_state.lap_start_time
-            progress_state.latest_lap_time = lap_time
-            if progress_state.best_lap_time is None or lap_time < progress_state.best_lap_time:
-                progress_state.best_lap_time = lap_time
-            progress_state.lap_start_time = sim_time
-            progress_state.ready_for_finish = False
-            progress_state.checkpoints_passed_current_cycle = 0
-            progress_state.next_checkpoint_idx = 0
-            events["lap_completed"] = True
-            events["lap_time"] = lap_time
+    lap_allowed = progress_state.ready_for_finish or not cfg.require_start_finish_after_checkpoints
+    if crossed_start and lap_allowed:
+        lap_completed_now = True
+        progress_state.laps_completed += 1
+        lap_time = sim_time - progress_state.lap_start_time
+        progress_state.latest_lap_time = lap_time
+        if progress_state.best_lap_time is None or lap_time < progress_state.best_lap_time:
+            progress_state.best_lap_time = lap_time
+        progress_state.lap_start_time = sim_time
+        progress_state.ready_for_finish = False
+        progress_state.checkpoints_passed_current_cycle = 0
+        progress_state.next_checkpoint_idx = 0
+        events["lap_completed"] = True
+        events["lap_time"] = lap_time
 
     progress_scalar = _compute_progress_scalar(track, progress_state, curr_pos)
     events["lap_completed_now"] = lap_completed_now

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 
@@ -27,7 +27,9 @@ def segments_from_polygon(points: np.ndarray) -> list[Segment]:
     return segs
 
 
-def segment_intersection(p1: np.ndarray, p2: np.ndarray, q1: np.ndarray, q2: np.ndarray) -> tuple[bool, np.ndarray | None]:
+def segment_intersection(
+    p1: np.ndarray, p2: np.ndarray, q1: np.ndarray, q2: np.ndarray
+) -> tuple[bool, np.ndarray | None]:
     r = p2 - p1
     s = q2 - q1
     rxs = _cross2(r, s)
@@ -46,7 +48,9 @@ def segment_intersection(p1: np.ndarray, p2: np.ndarray, q1: np.ndarray, q2: np.
     return False, None
 
 
-def ray_segment_distance(ray_origin: np.ndarray, ray_dir: np.ndarray, seg_a: np.ndarray, seg_b: np.ndarray) -> float | None:
+def ray_segment_distance(
+    ray_origin: np.ndarray, ray_dir: np.ndarray, seg_a: np.ndarray, seg_b: np.ndarray
+) -> float | None:
     v1 = ray_origin - seg_a
     v2 = seg_b - seg_a
     v3 = np.array([-ray_dir[1], ray_dir[0]], dtype=float)

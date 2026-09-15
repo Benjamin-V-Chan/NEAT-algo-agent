@@ -1,8 +1,8 @@
+# Core runtime dependencies (headless training, analysis, replay).
+# For live rendering and Parquet telemetry, install the extras instead:
+#   pip install -e '.[viz,parquet]'
 numpy>=1.26
 pandas>=2.2
 matplotlib>=3.8
 PyYAML>=6.0
 neat-python>=0.92
-pygame>=2.6
-pyarrow>=15.0
-pytest>=8.0

@@ -26,6 +26,7 @@ car:
   max_steer_angle_deg: 34.0
   steer_speed_decay: 0.55
   min_steer_gain: 0.2
+  collision_speed_retain: 0.35
 
 sensors:
   angles_deg: [-80, -45, -20, -8, 0, 8, 20, 45, 80]
@@ -35,7 +36,6 @@ sensors:
 termination:
   stagnation_window_steps: 160
   min_progress_delta: 0.015
-  max_reverse_steps: 40
   max_spin_window_steps: 120
   spin_angular_velocity_threshold: 6.0
   max_wall_contacts: 16
@@ -74,7 +74,6 @@ fitness:
 
 neat:
   population_size: 120
-  config_file: configs/neat_config.ini
   activation_default: tanh
   hidden_nodes: 0
   survival_threshold: 0.2

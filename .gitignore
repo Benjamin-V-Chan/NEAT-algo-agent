@@ -211,3 +211,6 @@ outputs/*
 !outputs/.gitkeep
 saved_artifacts/*
 !saved_artifacts/.gitkeep
+
+# Local working notes (project brief / deep dive)
+notes/

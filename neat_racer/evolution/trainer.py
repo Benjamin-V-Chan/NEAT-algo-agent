@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import pickle
-from pathlib import Path
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import neat
@@ -118,9 +118,6 @@ class NeatTrainer:
             net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
             accumulator = FitnessAccumulator(weights)
 
-            def _fitness_step(features: dict) -> float:
-                return accumulator.step(features)
-
             render_step = None
             if self.renderer:
                 render_step = self._build_render_step(generation, genome_id)
@@ -131,7 +128,7 @@ class NeatTrainer:
                 generation=generation,
                 genome_id=genome_id,
                 controller=network_controller(net.activate),
-                fitness_step_fn=_fitness_step,
+                fitness_step_fn=accumulator.step,
                 render_step=render_step,
             )
 
@@ -155,9 +152,10 @@ class NeatTrainer:
                 self.best_genome = genome
                 self.best_genome_id = genome_id
 
-            if episode.best_lap_time is not None:
-                if self.best_lap_time is None or episode.best_lap_time < self.best_lap_time:
-                    self.best_lap_time = episode.best_lap_time
+            if episode.best_lap_time is not None and (
+                self.best_lap_time is None or episode.best_lap_time < self.best_lap_time
+            ):
+                self.best_lap_time = episode.best_lap_time
 
             self.metrics_bus.update_car(
                 genome_id=genome_id,
@@ -251,7 +249,9 @@ class NeatTrainer:
 
         return _render
 
-    def _save_generation_champion(self, generation: int, genomes: list[tuple[int, neat.DefaultGenome]], genome_id: int) -> None:
+    def _save_generation_champion(
+        self, generation: int, genomes: list[tuple[int, neat.DefaultGenome]], genome_id: int
+    ) -> None:
         candidate = None
         for gid, genome in genomes:
             if gid == genome_id:

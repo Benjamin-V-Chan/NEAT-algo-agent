@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +93,9 @@ def row_from_episode(result: Any) -> dict[str, Any]:
         "checkpoints_passed": result.checkpoints_passed,
         "max_progress": result.max_progress,
         "distance_traveled": result.distance_traveled,
-        "progress_efficiency": (result.max_progress / result.distance_traveled) if result.distance_traveled > 1e-9 else 0.0,
+        "progress_efficiency": (
+            result.max_progress / result.distance_traveled if result.distance_traveled > 1e-9 else 0.0
+        ),
         "survival_time": result.survival_time,
         "avg_speed": result.avg_speed,
         "max_speed": result.max_speed,

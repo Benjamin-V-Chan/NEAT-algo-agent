@@ -8,7 +8,7 @@ from pathlib import Path
 import neat
 import pandas as pd
 
-from neat_racer.config import ExperimentConfig, load_experiment_config_json
+from neat_racer.config import load_experiment_config_json
 from neat_racer.simulation.env import network_controller, run_episode
 from neat_racer.simulation.track import load_track
 from neat_racer.telemetry.metrics_bus import MetricsBus

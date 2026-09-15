@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 import matplotlib
-import numpy as np
 import pandas as pd
 
 from neat_racer.analysis.loader import RunData
@@ -20,6 +19,24 @@ class AnalysisReport:
         self.run_dir = Path(run_dir)
         self.plots_dir = self.run_dir / "plots"
         self.plots_dir.mkdir(parents=True, exist_ok=True)
+        self._config: dict | None = None
+
+    def _experiment_config(self) -> dict:
+        if self._config is None:
+            cfg_path = self.run_dir / "experiment_config.json"
+            try:
+                self._config = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self._config = {}
+        return self._config
+
+    def _config_value(self, path: tuple[str, ...], default):
+        node = self._experiment_config()
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                return default
+            node = node[key]
+        return node
 
     def generate(self) -> None:
         data = RunData(self.run_dir)
@@ -82,8 +99,9 @@ class AnalysisReport:
         if crashes.empty:
             return
 
+        bins = self._config_value(("analysis", "crash_heatmap_bins"), default=36)
         fig, ax = plt.subplots(figsize=(8, 6), dpi=130)
-        heat = ax.hist2d(crashes["crash_x"], crashes["crash_y"], bins=36, cmap="inferno")
+        heat = ax.hist2d(crashes["crash_x"], crashes["crash_y"], bins=bins, cmap="inferno")
         fig.colorbar(heat[3], ax=ax, label="Crash density")
         ax.set_title("Crash Heatmap")
         ax.set_xlabel("X")
@@ -173,13 +191,8 @@ class AnalysisReport:
         )
 
     def _infer_total_checkpoints(self) -> int | None:
-        cfg_path = self.run_dir / "experiment_config.json"
-        if not cfg_path.exists():
-            return None
-        try:
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            track_path = cfg["simulation"]["track_file"]
-        except Exception:
+        track_path = self._config_value(("simulation", "track_file"), default=None)
+        if not track_path:
             return None
 
         try:

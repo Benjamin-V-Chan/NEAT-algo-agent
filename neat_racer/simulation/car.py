@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -29,6 +29,7 @@ class CarState:
     alive: bool = True
     crashed: bool = False
     wall_contacts: int = 0
+    in_contact: bool = False
     lap_count: int = 0
     progress_scalar: float = 0.0
     checkpoint_index: int = 0
@@ -37,7 +38,6 @@ class CarState:
     speed_integral: float = 0.0
     steps: int = 0
     stall_events: int = 0
-    reverse_steps: int = 0
     steering_history: list[float] = field(default_factory=list)
     throttle_history: list[float] = field(default_factory=list)
     steering_jerk_accum: float = 0.0
@@ -93,7 +93,10 @@ def integrate_car_step(state: CarState, control: CarControl, car_cfg: CarSection
     delta = math.radians(car_cfg.max_steer_angle_deg) * steer
     speed_ratio = 0.0 if car_cfg.max_speed <= 1e-9 else next_speed / car_cfg.max_speed
     steer_gain = max(car_cfg.min_steer_gain, 1.0 - car_cfg.steer_speed_decay * speed_ratio)
-    yaw_rate = (0.0 if abs(car_cfg.wheelbase) < 1e-9 else (next_speed / car_cfg.wheelbase) * math.tan(delta) * steer_gain)
+    if abs(car_cfg.wheelbase) < 1e-9:
+        yaw_rate = 0.0
+    else:
+        yaw_rate = (next_speed / car_cfg.wheelbase) * math.tan(delta) * steer_gain
 
     heading = state.heading + yaw_rate * dt
     dx = next_speed * math.cos(heading) * dt
