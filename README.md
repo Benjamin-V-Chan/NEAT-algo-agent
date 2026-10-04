@@ -71,6 +71,10 @@ python main.py compare --runs outputs/run_a outputs/run_b --output-dir outputs/c
 
 # Batch across seeds (auto-compares at the end)
 python main.py batch --config configs/default_experiment.yaml --seeds 1 2 3 4
+
+# Validate / visualize track files
+python main.py track --validate-all tracks
+python main.py track --render tracks/chicane_loop.json --out chicane.png
 ```
 
 The installed console script `neat-racer` is equivalent to `python main.py`.
@@ -144,12 +148,17 @@ Each run creates `outputs/<timestamp>_<experiment>/` containing:
 - `best_genome.pkl` + `best_genome_metadata.json`, `champion_history.json`
 - `champions/` per-generation champion pickles
 - `plots/` — training curves, lap-time progression, fitness distributions, crash heatmap,
-  control diagnostics, correlation + analysis summaries
+  control diagnostics, evolution dynamics (speciation + network complexity), curriculum
+  progression, a behavioral-correlation heatmap, the champion's speed-colored trajectory, a
+  track speed heatmap, and correlation + analysis summaries
 - `replays/` — champion trajectory exports
 - `track_snapshot.png`
 
 ## Extending
-- **Tracks** — drop a JSON file in `tracks/` (see `tracks/baseline_loop.json` for the schema)
+- **Tracks** — drop a JSON file in `tracks/` (see `tracks/baseline_loop.json` for the schema), or
+  generate one procedurally from a centerline with `neat_racer.simulation.track_builder` (see
+  `tools/generate_tracks.py`). Validate/visualize any track with `python main.py track`. Bundled
+  tracks: `baseline_loop`, `oval_speedway`, `chicane_loop`, `hairpin_loop`.
 - **Observations** — add features in `simulation/sensors.py`
 - **Dynamics** — adjust the model/constraints in `simulation/car.py`
 - **Reward shaping** — edit `evolution/fitness.py`

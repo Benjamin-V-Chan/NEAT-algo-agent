@@ -79,7 +79,7 @@ class NeatTrainer:
 
         def eval_genomes(genomes: list[tuple[int, neat.DefaultGenome]], _: neat.Config) -> None:
             nonlocal generation_index
-            self._evaluate_generation(generation_index, genomes, neat_config)
+            self._evaluate_generation(generation_index, genomes, neat_config, population)
             generation_index += 1
 
         winner = population.run(eval_genomes, self.cfg.runtime.max_generations)
@@ -99,11 +99,19 @@ class NeatTrainer:
             best_lap_time=self.best_lap_time,
         )
 
+    @staticmethod
+    def _genome_complexity(genome: neat.DefaultGenome) -> tuple[int, int]:
+        """Return (node count, enabled-connection count) for a genome."""
+        nodes = len(genome.nodes)
+        connections = sum(1 for c in genome.connections.values() if c.enabled)
+        return nodes, connections
+
     def _evaluate_generation(
         self,
         generation: int,
         genomes: list[tuple[int, neat.DefaultGenome]],
         neat_config: neat.Config,
+        population: neat.Population,
     ) -> None:
         t0 = time.perf_counter()
         weights = self.scheduler.current_weights()
@@ -187,6 +195,12 @@ class NeatTrainer:
         gen_best_idx = int(np.argmax(fitnesses))
         gen_best = results[gen_best_idx]
 
+        complexities = [self._genome_complexity(genome) for _, genome in genomes]
+        node_counts = np.asarray([c[0] for c in complexities], dtype=float)
+        conn_counts = np.asarray([c[1] for c in complexities], dtype=float)
+        best_nodes, best_conns = complexities[gen_best_idx]
+        num_species = len(getattr(population.species, "species", {}))
+
         row = {
             "generation": generation,
             "population_size": len(results),
@@ -200,6 +214,11 @@ class NeatTrainer:
             "completion_rate": completion_rate,
             "crash_count": crash_count,
             "eval_time_sec": time.perf_counter() - t0,
+            "num_species": int(num_species),
+            "best_nodes": int(best_nodes),
+            "best_connections": int(best_conns),
+            "mean_nodes": float(np.mean(node_counts)),
+            "mean_connections": float(np.mean(conn_counts)),
         }
         self.logger.add_generation_row(row)
 

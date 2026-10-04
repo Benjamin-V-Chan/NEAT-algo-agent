@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 import pandas as pd
 
 from neat_racer.analysis.loader import RunData
@@ -45,6 +46,11 @@ class AnalysisReport:
         self._plot_fitness_distribution(data.per_car)
         self._plot_crash_heatmap(data.per_car)
         self._plot_control_distributions(data)
+        self._plot_evolution_dynamics(data.generation)
+        self._plot_curriculum_progression(data.generation)
+        self._plot_correlation_heatmap(data.per_car)
+        self._plot_champion_trajectory(data)
+        self._plot_speed_heatmap(data)
         self._write_correlation_summary(data.per_car)
         self._write_analysis_summary(data)
 
@@ -126,6 +132,163 @@ class AnalysisReport:
         fig.tight_layout()
         fig.savefig(self.plots_dir / "controls_diagnostics.png")
         plt.close(fig)
+
+    def _plot_evolution_dynamics(self, generation: pd.DataFrame) -> None:
+        if generation.empty or "num_species" not in generation.columns:
+            return
+        if generation["num_species"].isna().all():
+            return
+        fig, (ax_species, ax_complexity) = plt.subplots(2, 1, figsize=(10, 7), dpi=130, sharex=True)
+
+        ax_species.plot(generation["generation"], generation["num_species"], color="#8e44ad", marker="o")
+        ax_species.set_ylabel("Species")
+        ax_species.set_title("Speciation & Network Complexity")
+        ax_species.grid(alpha=0.3)
+
+        for col, label, color in [
+            ("best_nodes", "best nodes", "#2980b9"),
+            ("mean_nodes", "mean nodes", "#7fb3d5"),
+            ("best_connections", "best connections", "#c0392b"),
+            ("mean_connections", "mean connections", "#e59866"),
+        ]:
+            if col in generation.columns:
+                ax_complexity.plot(generation["generation"], generation[col], label=label, color=color)
+        ax_complexity.set_xlabel("Generation")
+        ax_complexity.set_ylabel("Count")
+        ax_complexity.grid(alpha=0.3)
+        ax_complexity.legend(fontsize=8)
+
+        fig.tight_layout()
+        fig.savefig(self.plots_dir / "evolution_dynamics.png")
+        plt.close(fig)
+
+    def _plot_curriculum_progression(self, generation: pd.DataFrame) -> None:
+        if generation.empty:
+            return
+        fig, ax_left = plt.subplots(figsize=(10, 5), dpi=130)
+        ax_left.plot(
+            generation["generation"], generation["completion_rate"],
+            color="#27ae60", marker="o", label="completion rate",
+        )
+        ax_left.set_xlabel("Generation")
+        ax_left.set_ylabel("Lap completion rate", color="#27ae60")
+        ax_left.set_ylim(-0.02, 1.02)
+        ax_left.tick_params(axis="y", labelcolor="#27ae60")
+        ax_left.grid(alpha=0.3)
+
+        ax_right = ax_left.twinx()
+        ax_right.plot(generation["generation"], generation["crash_count"], color="#c0392b", label="crashes")
+        if "farthest_progress" in generation.columns:
+            ax_right.plot(
+                generation["generation"], generation["farthest_progress"], color="#2980b9",
+                linestyle="--", label="farthest progress (laps)",
+            )
+        ax_right.set_ylabel("Crashes / farthest progress")
+
+        lines_left, labels_left = ax_left.get_legend_handles_labels()
+        lines_right, labels_right = ax_right.get_legend_handles_labels()
+        ax_left.legend(lines_left + lines_right, labels_left + labels_right, loc="upper left", fontsize=8)
+        ax_left.set_title("Curriculum Progression")
+        fig.tight_layout()
+        fig.savefig(self.plots_dir / "curriculum_progression.png")
+        plt.close(fig)
+
+    def _plot_correlation_heatmap(self, per_car: pd.DataFrame) -> None:
+        if per_car.empty:
+            return
+        cols = [
+            "final_fitness", "laps_completed", "max_progress", "distance_traveled",
+            "avg_speed", "max_speed", "wall_contacts", "steering_var", "steering_jerk", "throttle_var",
+        ]
+        existing = [c for c in cols if c in per_car.columns]
+        corr = per_car[existing].corr(numeric_only=True)
+        if corr.empty:
+            return
+        fig, ax = plt.subplots(figsize=(9, 8), dpi=130)
+        im = ax.imshow(corr.to_numpy(), cmap="RdBu_r", vmin=-1.0, vmax=1.0)
+        ax.set_xticks(range(len(existing)))
+        ax.set_xticklabels(existing, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(range(len(existing)))
+        ax.set_yticklabels(existing, fontsize=8)
+        for i in range(len(existing)):
+            for j in range(len(existing)):
+                ax.text(j, i, f"{corr.iat[i, j]:.2f}", ha="center", va="center", fontsize=6,
+                        color="black" if abs(corr.iat[i, j]) < 0.6 else "white")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Pearson r")
+        ax.set_title("Behavioral Correlations")
+        fig.tight_layout()
+        fig.savefig(self.plots_dir / "correlation_heatmap.png")
+        plt.close(fig)
+
+    def _plot_champion_trajectory(self, data: RunData) -> None:
+        if data.per_step.empty or data.per_car.empty:
+            return
+        track = self._load_track_boundaries()
+        if track is None:
+            return
+
+        best_row = data.per_car.loc[data.per_car["final_fitness"].idxmax()]
+        traj = data.per_step[
+            (data.per_step["genome_id"] == best_row["genome_id"])
+            & (data.per_step["generation"] == best_row["generation"])
+        ].sort_values("tick")
+        if traj.empty:
+            return
+
+        outer, inner = track
+        fig, ax = plt.subplots(figsize=(9, 7), dpi=130)
+        ax.plot(outer[:, 0], outer[:, 1], color="black", linewidth=2)
+        ax.plot(inner[:, 0], inner[:, 1], color="black", linewidth=2)
+        sc = ax.scatter(traj["x"], traj["y"], c=traj["speed"], cmap="viridis", s=6)
+        fig.colorbar(sc, ax=ax, label="Speed")
+        ax.set_aspect("equal")
+        ax.set_title(
+            f"Champion Trajectory (gen {int(best_row['generation'])}, genome {int(best_row['genome_id'])})"
+        )
+        ax.grid(alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(self.plots_dir / "champion_trajectory.png")
+        plt.close(fig)
+
+    def _plot_speed_heatmap(self, data: RunData) -> None:
+        if data.per_step.empty:
+            return
+        track = self._load_track_boundaries()
+        step = data.per_step.dropna(subset=["x", "y", "speed"])
+        if step.empty:
+            return
+        fig, ax = plt.subplots(figsize=(9, 7), dpi=130)
+        hb = ax.hexbin(step["x"], step["y"], C=step["speed"], gridsize=40, cmap="magma", reduce_C_function=np.mean)
+        fig.colorbar(hb, ax=ax, label="Mean speed")
+        if track is not None:
+            outer, inner = track
+            ax.plot(outer[:, 0], outer[:, 1], color="white", linewidth=1.5)
+            ax.plot(inner[:, 0], inner[:, 1], color="white", linewidth=1.5)
+        ax.set_aspect("equal")
+        ax.set_title("Mean Speed Across the Track")
+        fig.tight_layout()
+        fig.savefig(self.plots_dir / "speed_heatmap.png")
+        plt.close(fig)
+
+    def _load_track_boundaries(self):
+        """Return (outer, inner) closed boundary arrays for the run's track, or None."""
+        track_path = self._config_value(("simulation", "track_file"), default=None)
+        if not track_path:
+            return None
+        try:
+            track_file = Path(track_path)
+            if not track_file.is_absolute() and not track_file.exists():
+                candidate = self.run_dir.parent.parent / track_file
+                if candidate.exists():
+                    track_file = candidate
+            track_json = json.loads(track_file.read_text(encoding="utf-8"))
+            outer = np.asarray(track_json["outer_boundary"], dtype=float)
+            inner = np.asarray(track_json["inner_boundary"], dtype=float)
+            outer = np.vstack([outer, outer[0]])
+            inner = np.vstack([inner, inner[0]])
+            return outer, inner
+        except Exception:
+            return None
 
     def _write_correlation_summary(self, per_car: pd.DataFrame) -> None:
         if per_car.empty:

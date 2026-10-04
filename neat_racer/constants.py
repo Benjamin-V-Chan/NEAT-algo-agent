@@ -23,6 +23,12 @@ GENERATION_SUMMARY_COLUMNS = [
     "completion_rate",
     "crash_count",
     "eval_time_sec",
+    # Evolution dynamics (speciation + network topology growth).
+    "num_species",
+    "best_nodes",
+    "best_connections",
+    "mean_nodes",
+    "mean_connections",
 ]
 
 PER_CAR_SUMMARY_COLUMNS = [
