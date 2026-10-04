@@ -7,7 +7,24 @@ All notable changes to NEAT Racer are documented here. This project loosely foll
 ### Added
 - `CHANGELOG.md` (this file).
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`): ruff + pytest matrix across
-  Python 3.11 / 3.12 / 3.13, triggered on pushes to `main` and on pull requests.
+  Python 3.11 / 3.12 / 3.13 / 3.14, triggered on pushes to `main` and on pull requests.
+- **Track tooling**: `simulation/track_builder.py` (build a valid annulus track from a centerline),
+  `simulation/track_validator.py` (geometry checks: fatal errors vs. warnings),
+  `visualization/track_plot.py` (matplotlib track renderer), a `track` CLI command
+  (`--validate` / `--validate-all` / `--render`), and `tools/generate_tracks.py`.
+- **Three new tracks**: `oval_speedway`, `chicane_loop`, `hairpin_loop` (procedurally generated and
+  validated).
+- **Richer analysis**: per-generation speciation + network-complexity tracking (new
+  `generation_summary.csv` columns) and five new plots — evolution dynamics, curriculum
+  progression, a behavioral-correlation heatmap, the champion's speed-colored trajectory, and a
+  track speed heatmap.
+- **Optional simulation realism** (`dynamics` config section, all off by default): grip-limited
+  understeer, Gaussian sensor noise, and a global surface-grip multiplier.
+- **Parallel training**: `runtime.num_workers > 1` evaluates a generation's episodes across worker
+  processes (headless); deterministic — identical results to the serial path, ~2.3× faster at 4
+  workers.
+- Reproducibility tests (serial determinism, parallel == serial) and track/analysis/dynamics tests
+  (test suite 18 → 32).
 
 ## [0.2.0]
 Focus: make the project install-and-run on modern Python, and make the code honest about its
