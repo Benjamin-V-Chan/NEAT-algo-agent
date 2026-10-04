@@ -23,6 +23,11 @@ class RuntimeSection:
     max_generations: int = 50
     evaluate_laps_required: int = 1
     realtime_speed: float = 1.0
+    # Parallel genome evaluation. 1 = serial (default). > 1 evaluates a
+    # generation's episodes across that many worker processes (headless only);
+    # episodes are deterministic given their inputs, so results match the serial
+    # path for the default (noise-free) model.
+    num_workers: int = 1
 
 
 @dataclass(slots=True)
@@ -247,6 +252,8 @@ def _validate_config(cfg: ExperimentConfig) -> None:
         raise ConfigError("simulation.dt must be positive")
     if cfg.runtime.max_generations <= 0:
         raise ConfigError("runtime.max_generations must be positive")
+    if cfg.runtime.num_workers < 1:
+        raise ConfigError("runtime.num_workers must be >= 1")
     if cfg.dynamics.surface_grip <= 0:
         raise ConfigError("dynamics.surface_grip must be positive")
     if cfg.dynamics.sensor_noise_std < 0:

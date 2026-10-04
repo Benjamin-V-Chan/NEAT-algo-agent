@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pickle
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,41 @@ class TrainingResult:
     best_genome_id: int
     best_fitness: float
     best_lap_time: float | None
+
+
+# --- Parallel evaluation workers (module-level so they pickle under 'spawn') ---
+_WORKER_STATE: dict[str, Any] = {}
+
+
+def _parallel_worker_init(cfg: ExperimentConfig, track: Any, neat_cfg_path: str) -> None:
+    neat_config = neat.Config(
+        neat.DefaultGenome,
+        neat.DefaultReproduction,
+        neat.DefaultSpeciesSet,
+        neat.DefaultStagnation,
+        neat_cfg_path,
+    )
+    _WORKER_STATE["cfg"] = cfg
+    _WORKER_STATE["track"] = track
+    _WORKER_STATE["neat_config"] = neat_config
+
+
+def _parallel_worker_eval(task: tuple[int, int, Any, Any]) -> Any:
+    generation, genome_id, genome, weights = task
+    cfg = _WORKER_STATE["cfg"]
+    track = _WORKER_STATE["track"]
+    neat_config = _WORKER_STATE["neat_config"]
+    net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
+    accumulator = FitnessAccumulator(weights)
+    return run_episode(
+        cfg,
+        track,
+        generation=generation,
+        genome_id=genome_id,
+        controller=network_controller(net.activate),
+        fitness_step_fn=accumulator.step,
+        render_step=None,
+    )
 
 
 class NeatTrainer:
@@ -115,33 +151,21 @@ class NeatTrainer:
     ) -> None:
         t0 = time.perf_counter()
         weights = self.scheduler.current_weights()
-
-        results = []
         crash_count = 0
         lap_finish_count = 0
 
         self.metrics_bus.update_generation(generation=generation, alive_count=len(genomes))
 
-        for i, (genome_id, genome) in enumerate(genomes):
-            net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
-            accumulator = FitnessAccumulator(weights)
+        use_parallel = self.cfg.runtime.num_workers > 1 and self.renderer is None
+        if use_parallel:
+            results = self._run_episodes_parallel(generation, genomes, weights)
+        else:
+            results = self._run_episodes_serial(generation, genomes, neat_config, weights)
 
-            render_step = None
-            if self.renderer:
-                render_step = self._build_render_step(generation, genome_id)
-
-            episode = run_episode(
-                self.cfg,
-                self.track,
-                generation=generation,
-                genome_id=genome_id,
-                controller=network_controller(net.activate),
-                fitness_step_fn=accumulator.step,
-                render_step=render_step,
-            )
-
+        # Aggregation runs in genome order, so best-fitness tie-breaking and all
+        # logging match the serial path regardless of how results were produced.
+        for i, ((genome_id, genome), episode) in enumerate(zip(genomes, results, strict=True)):
             genome.fitness = episode.fitness
-            results.append(episode)
 
             if episode.crash_flag:
                 crash_count += 1
@@ -176,12 +200,6 @@ class NeatTrainer:
                 sensor_angles_deg=self.cfg.sensors.angles_deg,
                 sensor_max_range=self.cfg.sensors.max_range,
             )
-
-            if self.renderer:
-                controls = self.renderer.poll_events()
-                if controls.quit_requested:
-                    raise KeyboardInterrupt("Quit requested by user")
-
             self.metrics_bus.update_generation(alive_count=max(0, len(genomes) - i - 1))
 
         fitnesses = np.asarray([r.fitness for r in results], dtype=float)
@@ -241,6 +259,50 @@ class NeatTrainer:
         )
 
         self._save_generation_champion(generation, genomes, int(gen_best.genome_id))
+
+    def _run_episodes_serial(
+        self,
+        generation: int,
+        genomes: list[tuple[int, neat.DefaultGenome]],
+        neat_config: neat.Config,
+        weights: Any,
+    ) -> list[Any]:
+        results: list[Any] = []
+        for genome_id, genome in genomes:
+            net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
+            accumulator = FitnessAccumulator(weights)
+            render_step = self._build_render_step(generation, genome_id) if self.renderer else None
+            episode = run_episode(
+                self.cfg,
+                self.track,
+                generation=generation,
+                genome_id=genome_id,
+                controller=network_controller(net.activate),
+                fitness_step_fn=accumulator.step,
+                render_step=render_step,
+            )
+            results.append(episode)
+            if self.renderer:
+                controls = self.renderer.poll_events()
+                if controls.quit_requested:
+                    raise KeyboardInterrupt("Quit requested by user")
+        return results
+
+    def _run_episodes_parallel(
+        self,
+        generation: int,
+        genomes: list[tuple[int, neat.DefaultGenome]],
+        weights: Any,
+    ) -> list[Any]:
+        tasks = [(generation, genome_id, genome, weights) for genome_id, genome in genomes]
+        neat_cfg_path = str(self.run_dir / "neat_config_used.txt")
+        with ProcessPoolExecutor(
+            max_workers=self.cfg.runtime.num_workers,
+            initializer=_parallel_worker_init,
+            initargs=(self.cfg, self.track, neat_cfg_path),
+        ) as pool:
+            # pool.map preserves task order, so results stay aligned with `genomes`.
+            return list(pool.map(_parallel_worker_eval, tasks))
 
     def _build_render_step(self, generation: int, genome_id: int):
         def _render(track, car, sensor_vec, overlay):

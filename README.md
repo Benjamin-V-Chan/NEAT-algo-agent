@@ -79,6 +79,15 @@ python main.py track --render tracks/chicane_loop.json --out chicane.png
 
 The installed console script `neat-racer` is equivalent to `python main.py`.
 
+### Parallel training
+Set `runtime.num_workers` above 1 to evaluate each generation's episodes across worker processes
+(headless only). Because the default model is noise-free, per-episode results are deterministic
+given their inputs, so a parallel run reproduces the serial run's outcome exactly — only faster.
+```yaml
+runtime:
+  num_workers: 4
+```
+
 ## Controls (Live Mode)
 - `SPACE` — pause / unpause
 - `+` / `-` — speed up / slow down the render loop
@@ -93,7 +102,7 @@ error**, so the config is self-documenting and typo-safe. Main sections:
 | Section       | Purpose |
 |---------------|---------|
 | `experiment`  | name, description, seed |
-| `runtime`     | mode, generation count, determinism |
+| `runtime`     | mode, generation count, determinism, `num_workers` (parallel eval) |
 | `simulation`  | timestep, max episode steps, track file |
 | `car`         | kinematics, drag/steer limits, wall-contact speed retention |
 | `sensors`     | ray angles/range and the optional alignment feature |
