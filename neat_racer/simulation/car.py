@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from neat_racer.config import CarSection
+from neat_racer.config import CarSection, DynamicsSection
 from neat_racer.utils.math_utils import clamp, clamp01
 
 
@@ -75,16 +75,25 @@ def decode_network_outputs(outputs: list[float]) -> CarControl:
     return CarControl(steer=steer, throttle=throttle, brake=brake)
 
 
-def integrate_car_step(state: CarState, control: CarControl, car_cfg: CarSection, dt: float) -> StepResult:
+def integrate_car_step(
+    state: CarState,
+    control: CarControl,
+    car_cfg: CarSection,
+    dt: float,
+    dynamics: DynamicsSection | None = None,
+) -> StepResult:
     prev_pos = state.pos.copy()
 
     steer = clamp(control.steer, -1.0, 1.0)
     throttle = clamp01(control.throttle)
     brake = clamp01(control.brake)
 
+    # Global grip multiplier scales tractive/braking force; resistive drag and
+    # rolling losses are unaffected. grip == 1.0 reproduces the base model exactly.
+    grip = dynamics.surface_grip if dynamics is not None else 1.0
+    traction = car_cfg.acceleration_max * throttle - car_cfg.braking_max * brake
     a_long = (
-        car_cfg.acceleration_max * throttle
-        - car_cfg.braking_max * brake
+        grip * traction
         - car_cfg.drag_coeff * state.speed
         - car_cfg.rolling_coeff * (1.0 if state.speed > 0 else 0.0)
     )
@@ -97,6 +106,14 @@ def integrate_car_step(state: CarState, control: CarControl, car_cfg: CarSection
         yaw_rate = 0.0
     else:
         yaw_rate = (next_speed / car_cfg.wheelbase) * math.tan(delta) * steer_gain
+
+    # Grip-limited cornering (understeer): if demanded lateral acceleration exceeds
+    # the grip budget, scale the yaw rate down so the car washes wide.
+    if dynamics is not None and dynamics.understeer_enabled:
+        lateral_accel = abs(next_speed * yaw_rate)
+        grip_budget = dynamics.max_lateral_accel * grip
+        if grip_budget > 1e-9 and lateral_accel > grip_budget:
+            yaw_rate *= grip_budget / lateral_accel
 
     heading = state.heading + yaw_rate * dt
     dx = next_speed * math.cos(heading) * dt

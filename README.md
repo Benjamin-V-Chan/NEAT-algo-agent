@@ -97,6 +97,7 @@ error**, so the config is self-documenting and typo-safe. Main sections:
 | `simulation`  | timestep, max episode steps, track file |
 | `car`         | kinematics, drag/steer limits, wall-contact speed retention |
 | `sensors`     | ray angles/range and the optional alignment feature |
+| `dynamics`    | optional realism (off by default): understeer, sensor noise, surface grip |
 | `termination` | stagnation / spin / wall-contact-budget kill switches |
 | `progress`    | checkpoint radius and lap sequencing rules |
 | `fitness`     | early/late weight sets and the curriculum blend target |
@@ -124,6 +125,16 @@ error**, so the config is self-documenting and typo-safe. Main sections:
 - Checkpoints must be crossed **in strict order** (gate segment intersection)
 - A lap requires a full checkpoint cycle followed by crossing the start/finish line
 - Scalar progress: `laps + (checkpoint_index + intra-sector_fraction) / num_checkpoints`
+
+### Optional dynamics (realism)
+All **off by default** (defaults reproduce the base model exactly), enabled per-run under
+`dynamics`:
+- **Understeer** — grip-limited cornering: when lateral acceleration `v·yaw_rate` exceeds the grip
+  budget `max_lateral_accel`, the yaw rate is scaled down so the car washes wide.
+- **Sensor noise** — Gaussian noise (`sensor_noise_std`) on the normalized rays the controller
+  sees (telemetry/rendering rays stay clean), reproducible under the run seed.
+- **Surface grip** — a global `surface_grip` multiplier on tractive/braking force and the lateral
+  grip budget (`< 1` = slippery).
 
 ### Wall contacts
 Touching a wall is **not** instantly fatal. Each new contact bleeds speed

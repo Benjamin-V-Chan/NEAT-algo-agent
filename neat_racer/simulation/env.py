@@ -108,9 +108,15 @@ def run_episode(
         progress_delta = car.progress_scalar - last_progress
 
         obs = build_observation(track, car, cfg.sensors, speed_norm, progress_delta)
+        # Optional sensor noise: perturb only the ray portion of the observation that
+        # the controller sees; telemetry/rendering rays (recomputed below) stay clean.
+        if cfg.dynamics.sensor_noise_enabled and cfg.dynamics.sensor_noise_std > 0:
+            n_rays = len(cfg.sensors.angles_deg)
+            noise = np.random.normal(0.0, cfg.dynamics.sensor_noise_std, n_rays)
+            obs[:n_rays] = np.clip(obs[:n_rays] + noise, 0.0, 1.0)
         control = controller(obs)
 
-        step = integrate_car_step(car, control, cfg.car, dt)
+        step = integrate_car_step(car, control, cfg.car, dt, cfg.dynamics)
 
         # Wall-contact model: touching a wall is not instantly fatal. Each new
         # contact (rising edge) counts against a budget; while in contact the car

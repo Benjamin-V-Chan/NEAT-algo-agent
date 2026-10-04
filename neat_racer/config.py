@@ -58,6 +58,29 @@ class SensorSection:
 
 
 @dataclass(slots=True)
+class DynamicsSection:
+    """Optional, off-by-default realism extensions to the base kinematic model.
+
+    All defaults reproduce the original deterministic behavior exactly: understeer
+    and sensor noise are disabled and ``surface_grip`` is 1.0 (full grip).
+    """
+
+    # Grip-limited cornering: when the car's lateral acceleration (v * yaw_rate)
+    # exceeds the grip budget, the yaw rate is scaled down so the car washes out.
+    understeer_enabled: bool = False
+    max_lateral_accel: float = 900.0
+
+    # Gaussian noise added to the normalized [0, 1] sensor rays fed to the controller
+    # (telemetry/rendering rays stay clean). Reproducible under the run seed.
+    sensor_noise_enabled: bool = False
+    sensor_noise_std: float = 0.02
+
+    # Global grip multiplier scaling tractive/braking force (and the lateral grip
+    # budget). < 1.0 models a slippery surface, > 1.0 extra grip.
+    surface_grip: float = 1.0
+
+
+@dataclass(slots=True)
 class TerminationSection:
     stagnation_window_steps: int = 160
     min_progress_delta: float = 0.015
@@ -155,6 +178,7 @@ class ExperimentConfig:
     simulation: SimulationSection = field(default_factory=SimulationSection)
     car: CarSection = field(default_factory=CarSection)
     sensors: SensorSection = field(default_factory=SensorSection)
+    dynamics: DynamicsSection = field(default_factory=DynamicsSection)
     termination: TerminationSection = field(default_factory=TerminationSection)
     progress: ProgressSection = field(default_factory=ProgressSection)
     fitness: FitnessSection = field(default_factory=FitnessSection)
@@ -223,3 +247,9 @@ def _validate_config(cfg: ExperimentConfig) -> None:
         raise ConfigError("simulation.dt must be positive")
     if cfg.runtime.max_generations <= 0:
         raise ConfigError("runtime.max_generations must be positive")
+    if cfg.dynamics.surface_grip <= 0:
+        raise ConfigError("dynamics.surface_grip must be positive")
+    if cfg.dynamics.sensor_noise_std < 0:
+        raise ConfigError("dynamics.sensor_noise_std must be non-negative")
+    if cfg.dynamics.max_lateral_accel <= 0:
+        raise ConfigError("dynamics.max_lateral_accel must be positive")
