@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--seeds", nargs="+", type=int, required=True)
     batch.add_argument("--live", action="store_true")
 
+    track = sub.add_parser("track", help="Validate or render track files")
+    track.add_argument("--validate", type=Path, metavar="FILE", help="Validate a single track file")
+    track.add_argument("--validate-all", type=Path, metavar="DIR", help="Validate every *.json in DIR")
+    track.add_argument("--render", type=Path, metavar="FILE", help="Render a track to a PNG")
+    track.add_argument("--out", type=Path, default=None, help="Output PNG path for --render")
+
     return parser
 
 
@@ -98,6 +104,52 @@ def cmd_batch(args: argparse.Namespace) -> list[Path]:
     return run_dirs
 
 
+def cmd_track(args: argparse.Namespace) -> int:
+    from neat_racer.simulation.track import load_track
+    from neat_racer.simulation.track_validator import has_errors, validate_track
+
+    if not any([args.validate, args.validate_all, args.render]):
+        print("track: pass one of --validate, --validate-all, or --render")
+        return 1
+
+    exit_code = 0
+
+    targets: list[Path] = []
+    if args.validate:
+        targets.append(args.validate)
+    if args.validate_all:
+        targets.extend(sorted(args.validate_all.glob("*.json")))
+
+    for path in targets:
+        try:
+            track = load_track(path)
+        except Exception as exc:  # noqa: BLE001 - surface any load error as a validation failure
+            print(f"[FAIL] {path}: {exc}")
+            exit_code = 1
+            continue
+        issues = validate_track(track)
+        if has_errors(issues):
+            exit_code = 1
+            label = "FAIL"
+        elif issues:
+            label = "warn"
+        else:
+            label = "ok"
+        print(f"[{label}] {path}  ({len(track.checkpoints)} checkpoints)")
+        for issue in issues:
+            print(f"        - {issue}")
+
+    if args.render:
+        from neat_racer.visualization.track_plot import render_track
+
+        track = load_track(args.render)
+        out = args.out or args.render.with_suffix(".png")
+        written = render_track(track, out)
+        print(f"Track rendered to: {written}")
+
+    return exit_code
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -126,6 +178,9 @@ def main() -> int:
         runs = cmd_batch(args)
         print(f"Batch complete. Runs: {[str(r) for r in runs]}")
         return 0
+
+    if args.command == "track":
+        return cmd_track(args)
 
     parser.print_help()
     return 1
