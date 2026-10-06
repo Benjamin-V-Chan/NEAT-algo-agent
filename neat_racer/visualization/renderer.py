@@ -140,7 +140,6 @@ class LiveRenderer:
         pygame = self._pygame
         self.screen.fill(BG)
         self._draw_track(track)
-        self._draw_checkpoints(track)
 
         if self.controls.draw_sensors:
             self._draw_rays(agents)
@@ -173,27 +172,16 @@ class LiveRenderer:
             self._pygame.image.save(self.screen, str(path))
 
     def _draw_track(self, track: Track) -> None:
+        # Just the track: filled corridor + a single clean wall edge + the start/finish line.
         pygame = self._pygame
         outer = [self.to_screen(p) for p in track.outer_boundary]
         inner = [self.to_screen(p) for p in track.inner_boundary]
         pygame.draw.polygon(self.screen, ASPHALT, outer)
         pygame.draw.polygon(self.screen, BG, inner)
-        pygame.draw.lines(self.screen, ASPHALT_EDGE, True, outer, 2)
-        pygame.draw.lines(self.screen, ASPHALT_EDGE, True, inner, 2)
-        # kerb accents just inside the outer wall
-        pygame.draw.lines(self.screen, KERB, True, outer, 1)
+        pygame.draw.lines(self.screen, KERB, True, outer, 2)
+        pygame.draw.lines(self.screen, KERB, True, inner, 2)
         sf = [self.to_screen(track.start_finish[0]), self.to_screen(track.start_finish[1])]
         pygame.draw.line(self.screen, START_FINISH, sf[0], sf[1], 4)
-
-    def _draw_checkpoints(self, track: Track) -> None:
-        if not self.cfg.draw_checkpoints:
-            return
-        pygame = self._pygame
-        overlay = pygame.Surface((self.cfg.width, self.cfg.height), pygame.SRCALPHA)
-        for gate in track.checkpoints:
-            a, b = self.to_screen(gate[0]), self.to_screen(gate[1])
-            pygame.draw.line(overlay, (*CHECKPOINT, 45), a, b, 1)
-        self.screen.blit(overlay, (0, 0))
 
     def _draw_rays(self, agents: list) -> None:
         pygame = self._pygame

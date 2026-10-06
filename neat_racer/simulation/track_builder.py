@@ -49,42 +49,32 @@ def resample_closed(points: np.ndarray, n: int) -> np.ndarray:
     return np.column_stack([out_x, out_y])
 
 
-def _mitered_offsets(centerline: np.ndarray, half_width: float) -> tuple[np.ndarray, np.ndarray]:
-    """Return (outer, inner) boundaries offset from the centerline by ``half_width``.
+def _constant_width_offsets(centerline: np.ndarray, half_width: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return (outer, inner) boundaries offset perpendicular to the centerline.
 
-    Uses per-vertex mitered normals so corners keep a roughly constant corridor width.
-    ``outer`` is offset away from the loop centroid, ``inner`` toward it.
+    Each boundary point is placed exactly ``half_width`` along the local unit normal (from a
+    central-difference tangent), so the corridor has a **constant** perpendicular width of
+    ``2 * half_width`` everywhere. ``outer`` is the side facing away from the loop centroid. For a
+    smooth centerline whose curvature radius exceeds ``half_width``, neither boundary self-intersects.
     """
     centroid = centerline.mean(axis=0)
     nxt = np.roll(centerline, -1, axis=0)
     prv = np.roll(centerline, 1, axis=0)
 
-    def left_normals(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        edge = b - a
-        length = np.linalg.norm(edge, axis=1, keepdims=True)
-        length = np.where(length < 1e-9, 1.0, length)
-        unit = edge / length
-        return np.column_stack([-unit[:, 1], unit[:, 0]])
+    tangent = nxt - prv  # central difference -> smooth local direction
+    length = np.linalg.norm(tangent, axis=1, keepdims=True)
+    length = np.where(length < 1e-9, 1.0, length)
+    unit_t = tangent / length
+    # Left-hand unit normal of the tangent.
+    normal = np.column_stack([-unit_t[:, 1], unit_t[:, 0]])
 
-    n_prev = left_normals(prv, centerline)
-    n_next = left_normals(centerline, nxt)
-
-    miter = n_prev + n_next
-    miter_len = np.linalg.norm(miter, axis=1, keepdims=True)
-    miter_len = np.where(miter_len < 1e-6, 1.0, miter_len)
-    miter_unit = miter / miter_len
-
-    # Miter scale compensates for the corridor narrowing at corners; clamp to avoid spikes.
-    cos_half = np.sum(miter_unit * n_next, axis=1, keepdims=True)
-    cos_half = np.clip(cos_half, 0.25, 1.0)
-    offset = miter_unit * (half_width / cos_half)
-
-    outward_sign = np.sign(np.sum(offset * (centerline - centroid), axis=1, keepdims=True))
+    # Orient every normal to point away from the centroid (outward), so width stays uniform.
+    outward_sign = np.sign(np.sum(normal * (centerline - centroid), axis=1, keepdims=True))
     outward_sign = np.where(outward_sign == 0, 1.0, outward_sign)
-    offset = offset * outward_sign
+    normal = normal * outward_sign
 
-    outer = centerline + offset
-    inner = centerline - offset
+    outer = centerline + half_width * normal
+    inner = centerline - half_width * normal
     return outer, inner
 
 
@@ -95,7 +85,7 @@ def build_annulus_track(
     half_width: float,
     *,
     n_checkpoints: int = 10,
-    samples: int = 160,
+    samples: int = 400,
     difficulty: str = "medium",
     scale: float = 1.0,
 ) -> dict:
@@ -115,7 +105,7 @@ def build_annulus_track(
     if _polygon_area(dense) < 0:
         dense = dense[::-1].copy()
 
-    outer, inner = _mitered_offsets(dense, half_width)
+    outer, inner = _constant_width_offsets(dense, half_width)
 
     n_gates = n_checkpoints + 1  # gate 0 is the start/finish line
     gate_indices = [round(k * samples / n_gates) % samples for k in range(n_gates)]

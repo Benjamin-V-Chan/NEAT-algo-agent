@@ -73,13 +73,14 @@ def _serpentine_loop() -> dict:
 
 
 def _technical_coil() -> dict:
+    # Several harmonics at different scales -> multiple turns in and out, still constant width.
     centerline = _harmonic_loop(
-        480, 360, 345, 255,
-        harmonics=[(5, 0.07, 0.0), (8, 0.03, 1.5)],
+        480, 360, 340, 260,
+        harmonics=[(3, 0.07, 0.0), (5, 0.05, 0.9), (7, 0.032, 2.1), (9, 0.018, 0.5)],
     )
     return build_annulus_track(
-        "technical_coil", "Technical Coil", centerline, half_width=28.0,
-        n_checkpoints=22, samples=440, difficulty="hard",
+        "technical_coil", "Technical Coil", centerline, half_width=25.0,
+        n_checkpoints=24, samples=480, difficulty="hard",
     )
 
 
