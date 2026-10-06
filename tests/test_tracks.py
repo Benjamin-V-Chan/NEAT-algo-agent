@@ -10,7 +10,7 @@ from neat_racer.simulation.track import Track, load_track
 from neat_racer.simulation.track_builder import build_annulus_track, resample_closed
 from neat_racer.simulation.track_validator import has_errors, validate_track
 
-BUNDLED_TRACKS = ["baseline_loop", "oval_speedway", "chicane_loop", "hairpin_loop"]
+BUNDLED_TRACKS = ["baseline_loop", "oval_speedway", "twisty_circuit", "serpentine_loop", "technical_coil"]
 
 
 def _ellipse_centerline(n: int = 160, a: float = 300.0, b: float = 200.0) -> np.ndarray:
