@@ -8,12 +8,21 @@ All notable changes to NEAT Racer are documented here. This project loosely foll
 - `CHANGELOG.md` (this file).
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`): ruff + pytest matrix across
   Python 3.11 / 3.12 / 3.13 / 3.14, triggered on pushes to `main` and on pull requests.
+- **Simultaneous population simulation**: the whole generation now drives at once in lockstep
+  (`CarAgent` + `run_population` in `simulation/env.py`) instead of one car at a time. Identical
+  fitness results (cars never interact), but the live view shows the entire field racing and
+  thinning out.
+- **Renderer rewrite** (`visualization/renderer.py`): every car drawn as a little car sprite
+  (body + cabin + headlights), a faint per-car raycast web, dead cars fading underneath, a
+  gold-ringed leader, and a translucent telemetry HUD. Offscreen capture mode for headless frames.
+- **Fatal walls** (`termination.wall_contact_fatal`, default True): the first wall contact ends a
+  car as a crash; set False for the previous forgiving contact-budget model.
 - **Track tooling**: `simulation/track_builder.py` (build a valid annulus track from a centerline),
   `simulation/track_validator.py` (geometry checks: fatal errors vs. warnings),
   `visualization/track_plot.py` (matplotlib track renderer), a `track` CLI command
   (`--validate` / `--validate-all` / `--render`), and `tools/generate_tracks.py`.
-- **Three new tracks**: `oval_speedway`, `chicane_loop`, `hairpin_loop` (procedurally generated and
-  validated).
+- **Thin, twisty tracks**: `oval_speedway`, `twisty_circuit`, `serpentine_loop`, `technical_coil`
+  (harmonic centerlines, thin corridors, 10–22 checkpoints), replacing the earlier fat loops.
 - **Richer analysis**: per-generation speciation + network-complexity tracking (new
   `generation_summary.csv` columns) and five new plots — evolution dynamics, curriculum
   progression, a behavioral-correlation heatmap, the champion's speed-colored trajectory, and a
@@ -23,8 +32,8 @@ All notable changes to NEAT Racer are documented here. This project loosely foll
 - **Parallel training**: `runtime.num_workers > 1` evaluates a generation's episodes across worker
   processes (headless); deterministic — identical results to the serial path, ~2.3× faster at 4
   workers.
-- Reproducibility tests (serial determinism, parallel == serial) and track/analysis/dynamics tests
-  (test suite 18 → 32).
+- Reproducibility tests (serial determinism, parallel == serial) and track/analysis/dynamics/env
+  tests (test suite 18 → 34).
 
 ## [0.2.0]
 Focus: make the project install-and-run on modern Python, and make the code honest about its
