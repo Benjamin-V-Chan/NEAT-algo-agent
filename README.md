@@ -17,19 +17,22 @@ path — and evolution shapes a neural controller from "barely moves" to "drives
 ## Project Layout
 ```text
 neat_racer/
-  analysis/       # run loaders, plots, multi-run comparison
-  evolution/      # NEAT config builder, curriculum fitness, trainer
+  analysis/       # run loaders, plots (incl. evolution/curriculum/trajectory), comparison
+  evolution/      # NEAT config builder, curriculum fitness, trainer (serial + parallel eval)
   replay/         # saved-champion replay
-  simulation/     # geometry, track, car dynamics, sensors, progress, termination
+  simulation/     # geometry, track, car dynamics, sensors, progress, termination,
+                  #   track_builder (procedural tracks) + track_validator
   telemetry/      # metrics bus + structured logging
   utils/          # seeds, filesystem, math helpers
-  visualization/  # pygame renderer and HUD (optional)
+  visualization/  # pygame renderer + HUD (optional) and a matplotlib track_plot
 configs/          # YAML experiment configs
-tracks/           # JSON track definitions
+tracks/           # JSON track definitions (baseline_loop, oval_speedway, chicane_loop, hairpin_loop)
+tools/            # helper scripts (generate_tracks.py)
 outputs/          # timestamped run artifacts (auto-created, git-ignored)
 saved_artifacts/  # optional static artifacts storage
-tests/            # unit + smoke tests
+tests/            # unit + smoke + reproducibility tests
 main.py           # CLI entrypoint
+CHANGELOG.md      # release notes
 ```
 
 ## Installation
