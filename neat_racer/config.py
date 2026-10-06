@@ -92,6 +92,9 @@ class TerminationSection:
     max_spin_window_steps: int = 120
     spin_angular_velocity_threshold: float = 6.0
     max_wall_contacts: int = 16
+    # When True (default), the first wall contact ends the car immediately (a crash). When False,
+    # contacts bleed speed + bounce the car back and count against max_wall_contacts.
+    wall_contact_fatal: bool = True
 
 
 @dataclass(slots=True)

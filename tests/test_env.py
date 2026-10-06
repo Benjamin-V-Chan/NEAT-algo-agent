@@ -11,10 +11,24 @@ def _cfg() -> ExperimentConfig:
     return cfg
 
 
-def test_wall_contact_is_not_instantly_fatal(simple_track) -> None:
-    """A car steering into a wall should survive past the first contact tick and
-    accumulate wall contacts rather than dying immediately (wall-contact model)."""
+def test_wall_contact_is_fatal_by_default(simple_track) -> None:
+    """With the default (fatal) wall model, the first contact ends the car as a crash."""
     cfg = _cfg()
+
+    def controller(_obs):
+        return CarControl(steer=-1.0, throttle=1.0, brake=0.0)
+
+    episode = run_episode(cfg, simple_track, 0, 0, controller, lambda _f: 0.0)
+
+    assert episode.crash_flag
+    assert episode.wall_contacts == 1
+    assert episode.crash_x is not None and episode.crash_y is not None
+
+
+def test_wall_contact_not_fatal_when_disabled(simple_track) -> None:
+    """With wall_contact_fatal=False, a car survives past the first contact (budget model)."""
+    cfg = _cfg()
+    cfg.termination.wall_contact_fatal = False
 
     def controller(_obs):
         return CarControl(steer=-1.0, throttle=1.0, brake=0.0)
@@ -27,8 +41,9 @@ def test_wall_contact_is_not_instantly_fatal(simple_track) -> None:
 
 
 def test_wall_contact_budget_terminates_with_crash(simple_track) -> None:
-    """Exhausting the contact budget ends the episode and flags a crash."""
+    """With the budget model, exhausting max_wall_contacts ends the episode and flags a crash."""
     cfg = _cfg()
+    cfg.termination.wall_contact_fatal = False
     cfg.termination.max_wall_contacts = 1
     cfg.termination.stagnation_window_steps = 100000  # disable stagnation kill
     cfg.car.collision_speed_retain = 1.0  # keep bouncing off the wall

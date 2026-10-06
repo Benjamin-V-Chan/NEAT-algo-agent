@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import pickle
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import neat
 import pandas as pd
 
 from neat_racer.config import load_experiment_config_json
-from neat_racer.simulation.env import network_controller, run_episode
+from neat_racer.simulation.env import CarAgent, network_controller, run_population
 from neat_racer.simulation.track import load_track
 from neat_racer.telemetry.metrics_bus import MetricsBus
 from neat_racer.visualization.renderer import LiveRenderer
@@ -55,37 +56,38 @@ def replay_best_genome(run_dir: str | Path, live: bool = True) -> Path:
 
     trajectory_rows = []
 
-    def fitness_step(_: dict) -> float:
-        return 0.0
-
-    def render_step(track_obj, car, sensors, overlay):
-        if renderer is None:
-            return
-        metrics.update_generation(generation=overlay.get("generation", 0))
-        metrics.update_car(
-            genome_id=overlay.get("genome_id", -1),
-            speed=car.speed,
-            steer=overlay.get("steer_cmd", car.steering_cmd),
-            throttle=overlay.get("throttle_cmd", 0.0),
-            brake=overlay.get("brake_cmd", 0.0),
-            checkpoint=car.checkpoint_index,
-            lap=car.lap_count,
-            sensor_angles_deg=cfg.sensors.angles_deg,
-            sensor_max_range=cfg.sensors.max_range,
-        )
-        renderer.draw_frame(track_obj, [car], 0, sensors, overlay)
-
-    episode = run_episode(
-        cfg,
-        track,
-        generation=0,
-        genome_id=0,
-        controller=network_controller(net.activate),
-        fitness_step_fn=fitness_step,
-        render_step=render_step if live else None,
+    agent = CarAgent(
+        cfg, track, generation=0, genome_id=0,
+        controller=network_controller(net.activate), fitness_step_fn=lambda _f: 0.0,
     )
 
-    for step in episode.per_step:
+    def _overlay(agents, tick):
+        a = agents[0]
+        return {
+            "generation": 0, "tick": tick,
+            "alive": sum(1 for x in agents if x.alive), "total": len(agents),
+            "gen_best_fitness": a.fitness_total, "run_best_fitness": a.fitness_total,
+            "run_best_lap": a.progress_state.best_lap_time,
+            "lead_speed": a.car.speed, "lead_lap": a.car.lap_count,
+            "lead_checkpoint": a.car.checkpoint_index,
+        }
+
+    def render_all(track_obj, agents, tick):
+        if renderer is None:
+            return
+        controls = renderer.poll_events()
+        while controls.paused and not controls.quit_requested:
+            renderer.draw_population(track_obj, agents, _overlay(agents, tick))
+            controls = renderer.poll_events()
+        if controls.quit_requested:
+            raise KeyboardInterrupt("Quit requested by user")
+        renderer.draw_population(track_obj, agents, _overlay(agents, tick))
+
+    # A live quit (window close) raises KeyboardInterrupt; keep the partial trajectory.
+    with contextlib.suppress(KeyboardInterrupt):
+        run_population(cfg, track, [agent], render_all=render_all if live else None)
+
+    for step in agent.per_step:
         trajectory_rows.append(
             {
                 "tick": step.tick,

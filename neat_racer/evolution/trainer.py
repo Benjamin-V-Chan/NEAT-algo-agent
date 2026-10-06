@@ -16,7 +16,7 @@ import numpy as np
 from neat_racer.config import ExperimentConfig
 from neat_racer.evolution.fitness import CurriculumScheduler, FitnessAccumulator
 from neat_racer.evolution.neat_config_builder import render_neat_config
-from neat_racer.simulation.env import network_controller, run_episode
+from neat_racer.simulation.env import CarAgent, network_controller, run_episode, run_population
 from neat_racer.simulation.track import load_track
 from neat_racer.telemetry.logger import ExperimentLogger, row_from_episode, step_rows_from_episode
 from neat_racer.telemetry.metrics_bus import MetricsBus
@@ -260,6 +260,29 @@ class NeatTrainer:
 
         self._save_generation_champion(generation, genomes, int(gen_best.genome_id))
 
+    def _build_agents(
+        self,
+        generation: int,
+        genomes: list[tuple[int, neat.DefaultGenome]],
+        neat_config: neat.Config,
+        weights: Any,
+    ) -> list[CarAgent]:
+        agents: list[CarAgent] = []
+        for genome_id, genome in genomes:
+            net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
+            accumulator = FitnessAccumulator(weights)
+            agents.append(
+                CarAgent(
+                    self.cfg,
+                    self.track,
+                    generation=generation,
+                    genome_id=genome_id,
+                    controller=network_controller(net.activate),
+                    fitness_step_fn=accumulator.step,
+                )
+            )
+        return agents
+
     def _run_episodes_serial(
         self,
         generation: int,
@@ -267,26 +290,11 @@ class NeatTrainer:
         neat_config: neat.Config,
         weights: Any,
     ) -> list[Any]:
-        results: list[Any] = []
-        for genome_id, genome in genomes:
-            net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
-            accumulator = FitnessAccumulator(weights)
-            render_step = self._build_render_step(generation, genome_id) if self.renderer else None
-            episode = run_episode(
-                self.cfg,
-                self.track,
-                generation=generation,
-                genome_id=genome_id,
-                controller=network_controller(net.activate),
-                fitness_step_fn=accumulator.step,
-                render_step=render_step,
-            )
-            results.append(episode)
-            if self.renderer:
-                controls = self.renderer.poll_events()
-                if controls.quit_requested:
-                    raise KeyboardInterrupt("Quit requested by user")
-        return results
+        # The whole generation drives at once (lockstep). With a live renderer the viewer sees the
+        # entire field racing and crashing out; headless, it is identical to running them serially.
+        agents = self._build_agents(generation, genomes, neat_config, weights)
+        render_all = self._build_render_all(generation, len(agents)) if self.renderer else None
+        return run_population(self.cfg, self.track, agents, render_all=render_all)
 
     def _run_episodes_parallel(
         self,
@@ -304,31 +312,37 @@ class NeatTrainer:
             # pool.map preserves task order, so results stay aligned with `genomes`.
             return list(pool.map(_parallel_worker_eval, tasks))
 
-    def _build_render_step(self, generation: int, genome_id: int):
-        def _render(track, car, sensor_vec, overlay):
-            if not self.renderer:
+    def _build_render_all(self, generation: int, total: int):
+        def _render(track, agents, tick):
+            r = self.renderer
+            if not r:
                 return
-            controls = self.renderer.poll_events()
+            controls = r.poll_events()
             while controls.paused and not controls.quit_requested:
-                self.renderer.draw_frame(track, [car], 0, sensor_vec, overlay)
-                controls = self.renderer.poll_events()
+                r.draw_population(track, agents, self._live_overlay(generation, agents, tick, total))
+                controls = r.poll_events()
             if controls.quit_requested:
                 raise KeyboardInterrupt("Quit requested by user")
-            self.metrics_bus.update_car(
-                genome_id=genome_id,
-                speed=car.speed,
-                steer=overlay.get("steer_cmd", car.steering_cmd),
-                throttle=overlay.get("throttle_cmd", 0.0),
-                brake=overlay.get("brake_cmd", 0.0),
-                checkpoint=car.checkpoint_index,
-                lap=car.lap_count,
-                sensor_angles_deg=self.cfg.sensors.angles_deg,
-                sensor_max_range=self.cfg.sensors.max_range,
-            )
-            self.metrics_bus.update_generation(generation=generation)
-            self.renderer.draw_frame(track, [car], 0, sensor_vec, overlay)
+            r.draw_population(track, agents, self._live_overlay(generation, agents, tick, total))
 
         return _render
+
+    def _live_overlay(self, generation: int, agents: list[CarAgent], tick: int, total: int) -> dict:
+        alive = sum(1 for a in agents if a.alive)
+        gen_best = max((a.fitness_total for a in agents), default=0.0)
+        lead = max(agents, key=lambda a: a.fitness_total, default=None)
+        return {
+            "generation": generation,
+            "tick": tick,
+            "alive": alive,
+            "total": total,
+            "gen_best_fitness": gen_best,
+            "run_best_fitness": self.best_fitness if self.best_fitness > float("-inf") else 0.0,
+            "run_best_lap": self.best_lap_time,
+            "lead_speed": lead.car.speed if lead else 0.0,
+            "lead_lap": lead.car.lap_count if lead else 0,
+            "lead_checkpoint": lead.car.checkpoint_index if lead else 0,
+        }
 
     def _save_generation_champion(
         self, generation: int, genomes: list[tuple[int, neat.DefaultGenome]], genome_id: int
