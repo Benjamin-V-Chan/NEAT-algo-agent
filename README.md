@@ -1,150 +1,205 @@
 # NEAT Racer Research Platform
 
-A modular, data-heavy NEAT-driven autonomous racing simulator for evolving control policies on unknown closed-loop tracks.
+A modular, data-heavy [NEAT](https://neat-python.readthedocs.io/)-driven autonomous racing
+simulator for evolving control policies on closed-loop tracks. Cars perceive the world only
+through local ray sensors and a few internal-state features — there is no privileged optimal
+path — and evolution shapes a neural controller from "barely moves" to "drives clean laps."
 
 ## Highlights
-- 2D top-down racing simulation with deterministic fixed-step physics
-- Local perception only (ray sensors + internal state), no privileged optimal path input
-- `neat-python` evolution loop with champion persistence and replay mode
-- Curriculum-aware fitness shaping from progress to lap-time optimization
-- Structured experiment artifacts (`csv/json/parquet`, plots, champion files)
-- Headless-first training with optional live Pygame rendering and telemetry HUD
-- Analysis and run comparison tooling for post-run diagnostics
+- 2D top-down racing simulation with deterministic, fixed-step kinematic physics
+- Local perception only (ray sensors + internal state), no global track knowledge
+- `neat-python` evolution loop with champion persistence and a replay mode
+- Curriculum-aware fitness shaping that shifts from *make progress* to *lap fast*
+- Structured experiment artifacts (CSV / JSON / Parquet, plots, champion pickles)
+- Headless-first training with **optional** live Pygame rendering of the **whole population
+  racing at once**, with the sim rate decoupled from the display rate for smooth fast-forward
+- Vectorized geometry: every car's ray sensors and wall collisions are resolved for the entire
+  generation in a couple of batched numpy calls per tick
+- Post-run analysis and multi-run comparison tooling
 
 ## Project Layout
 ```text
 neat_racer/
-  analysis/       # run loaders, plots, multi-run comparison
-  evolution/      # NEAT config builder, fitness scheduler, trainer
+  analysis/       # run loaders, plots (incl. evolution/curriculum/trajectory), comparison
+  evolution/      # NEAT config builder, curriculum fitness, trainer (serial + parallel eval)
   replay/         # saved-champion replay
-  simulation/     # geometry, track, car dynamics, sensors, progress, termination
-  telemetry/      # metrics bus and structured logging
+  simulation/     # geometry, track, car dynamics, sensors, progress, termination,
+                  #   track_builder (procedural tracks) + track_validator
+  telemetry/      # structured logging (CSV / Parquet) + schemas
   utils/          # seeds, filesystem, math helpers
-  visualization/  # pygame renderer and HUD
-configs/          # YAML experiment configs + neat config template
-tracks/           # JSON track definitions
-outputs/          # timestamped run artifacts (auto-created)
+  visualization/  # pygame renderer + HUD (optional) and a matplotlib track_plot
+configs/          # YAML experiment configs
+tracks/           # JSON tracks (baseline_loop, oval_speedway, twisty_circuit, serpentine_loop, technical_coil)
+tools/            # helper scripts (generate_tracks.py)
+outputs/          # timestamped run artifacts (auto-created, git-ignored)
 saved_artifacts/  # optional static artifacts storage
 tests/            # unit + smoke tests
 main.py           # CLI entrypoint
 ```
 
 ## Installation
+Requires Python 3.11+.
+
 ```bash
 python -m venv .venv
-. .venv/Scripts/activate   # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-pip install -e .
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -e .                   # core: headless training, analysis, replay
 ```
 
-Optional Parquet support:
+Optional extras:
 ```bash
-pip install -e .[parquet]
+pip install -e '.[viz]'            # live Pygame rendering (pygame-ce)
+pip install -e '.[parquet]'        # columnar per-step telemetry (pyarrow)
+pip install -e '.[dev]'            # pytest + ruff (+ viz + parquet) for development
 ```
+
+> Rendering uses `pygame-ce`, the maintained community fork, which ships prebuilt wheels for
+> current Python versions. All non-rendering functionality works without it.
 
 ## CLI Usage
 ```bash
 # Train headless
 python main.py train --config configs/default_experiment.yaml
 
-# Train with live rendering
+# Train with live rendering (requires the 'viz' extra)
 python main.py train --config configs/default_experiment.yaml --live
 
-# Replay saved champion
-python main.py replay --run-dir outputs/<timestamped_run>
+# Replay the saved champion of a run
+python main.py replay --run-dir outputs/<timestamped_run>            # live window
+python main.py replay --run-dir outputs/<timestamped_run> --headless # export trajectory only
 
-# Analyze existing run
+# (Re)generate analysis plots for an existing run
 python main.py analyze --run-dir outputs/<timestamped_run>
 
 # Compare multiple runs
 python main.py compare --runs outputs/run_a outputs/run_b --output-dir outputs/comparisons/manual
 
-# Batch seeds
+# Batch across seeds (auto-compares at the end)
 python main.py batch --config configs/default_experiment.yaml --seeds 1 2 3 4
+
+# Validate / visualize track files
+python main.py track --validate-all tracks
+python main.py track --render tracks/technical_coil.json --out coil.png
+```
+
+The installed console script `neat-racer` is equivalent to `python main.py`.
+
+### Parallel training
+Set `runtime.num_workers` above 1 to evaluate each generation's episodes across worker processes
+(headless only). Because the default model is noise-free, per-episode results are deterministic
+given their inputs, so a parallel run reproduces the serial run's outcome exactly — only faster.
+```yaml
+runtime:
+  num_workers: 4
 ```
 
 ## Controls (Live Mode)
-- `SPACE`: pause/unpause
-- `+` / `-`: speed up / slow down rendering loop
-- `S`: toggle sensor rays
-- Window close: stop run
+The display runs at a steady `target_fps` while the simulation advances
+`sim_ticks_per_frame` ticks per drawn frame, so a whole generation is watchable in
+seconds — the "watch speed" is adjustable live without dropping the frame rate.
+
+- `SPACE` — pause / unpause
+- `[` / `]` — slower / faster watch speed (sim ticks per frame)
+- `S` — toggle sensor rays
+- `T` — toggle the leader trail
+- `ESC` or window close — stop the run (artifacts from completed generations are still saved)
 
 ## Configuration
-Primary config: `configs/default_experiment.yaml`.
+Primary config: `configs/default_experiment.yaml` (fast variant: `configs/smoke_experiment.yaml`).
+YAML keys map 1:1 onto the typed dataclasses in `neat_racer/config.py`; **unknown keys raise an
+error**, so the config is self-documenting and typo-safe. Main sections:
 
-Main sections:
-- `experiment`: name, description, seed
-- `runtime`: mode, deterministic policy, generation count
-- `simulation`: timestep, max episode steps, track path
-- `car`: kinematic + drag/steer constraints
-- `sensors`: ray angles/range and optional alignment feature
-- `termination`: stagnation/spin/wall-retry kill switches
-- `progress`: checkpoint and lap sequencing rules
-- `fitness`: early/late weights and curriculum blending target
-- `neat`: population and genome hyperparameters
-- `logging`: output root and per-step telemetry toggles
-- `rendering`: window and overlay settings
-- `analysis`: post-train analysis behavior
-- `replay`: replay defaults
+| Section       | Purpose |
+|---------------|---------|
+| `experiment`  | name, description, seed |
+| `runtime`     | mode, generation count, determinism, `num_workers` (parallel eval) |
+| `simulation`  | timestep, max episode steps, track file |
+| `car`         | kinematics, drag/steer limits, wall-contact speed retention |
+| `sensors`     | ray angles/range and the optional alignment feature |
+| `dynamics`    | optional realism (off by default): understeer, sensor noise, surface grip |
+| `termination` | stagnation / spin / wall-contact-budget kill switches |
+| `progress`    | checkpoint radius and lap sequencing rules |
+| `fitness`     | early/late weight sets and the curriculum blend target |
+| `neat`        | population size and genome hyperparameters |
+| `logging`     | output root and per-step telemetry toggles |
+| `rendering`   | window and overlay settings |
+| `analysis`    | post-train analysis behavior |
+| `replay`      | replay defaults |
 
 ## Mathematical Framework
-### Vehicle motion
-At each fixed step `dt`:
-- `a_long = a_max*throttle - b_max*brake - drag_coeff*v - rolling_coeff*sign(v)`
-- `v_{t+1} = clip(v_t + a_long*dt, 0, v_max)`
-- `delta = delta_max * steer_cmd`
-- `yaw_rate = (v/L) * tan(delta) * steer_gain(v)` with speed-dependent steering attenuation
-- `theta_{t+1} = theta_t + yaw_rate*dt`
-- `x_{t+1} = x_t + v_{t+1}*cos(theta_{t+1})*dt`
-- `y_{t+1} = y_t + v_{t+1}*sin(theta_{t+1})*dt`
+### Vehicle motion (per fixed step `dt`)
+- `a_long = a_max·throttle − b_max·brake − drag·v − rolling·sign(v)`
+- `v ← clip(v + a_long·dt, 0, v_max)`  *(speed is non-negative — the car cannot reverse)*
+- `δ = δ_max·steer_cmd`
+- `yaw_rate = (v / L)·tan(δ)·steer_gain(v)`, with `steer_gain = max(min_gain, 1 − decay·(v/v_max))`
+- `θ ← θ + yaw_rate·dt`,  `x ← x + v·cos(θ)·dt`,  `y ← y + v·sin(θ)·dt`
 
 ### Sensing
-- Configurable raycasts at fixed relative angles
-- Ray-segment intersection against track walls
-- Sensor values normalized: `s_i = min(distance_i, sensor_max)/sensor_max`
+- Raycasts at fixed relative angles, intersected against all track wall segments
+- Normalized: `s_i = min(distance_i, max_range) / max_range`
+- Observation vector = sensor rays + `[speed_norm, steer_norm, progress_delta]` (+ optional
+  centerline-alignment cosine). Its length auto-drives the NEAT network's input count.
 
 ### Progress / laps
-- Checkpoints must be crossed in strict order
-- Full cycle + start/finish crossing required for lap completion
-- Scalar progress: `laps_completed + (checkpoint_index + sector_fraction)/num_checkpoints`
+- Checkpoints must be crossed **in strict order** (gate segment intersection)
+- A lap requires a full checkpoint cycle followed by crossing the start/finish line
+- Scalar progress: `laps + (checkpoint_index + intra-sector_fraction) / num_checkpoints`
 
-### Fitness
-Per-step accumulation implements:
-- progress and checkpoint rewards
-- lap completion and lap-quality bonus
-- useful-speed reward weighted by progress delta
-- penalties for time, collision, stagnation, wall scraping, instability
+### Optional dynamics (realism)
+All **off by default** (defaults reproduce the base model exactly), enabled per-run under
+`dynamics`:
+- **Understeer** — grip-limited cornering: when lateral acceleration `v·yaw_rate` exceeds the grip
+  budget `max_lateral_accel`, the yaw rate is scaled down so the car washes wide.
+- **Sensor noise** — Gaussian noise (`sensor_noise_std`) on the normalized rays the controller
+  sees (telemetry/rendering rays stay clean), reproducible under the run seed.
+- **Surface grip** — a global `surface_grip` multiplier on tractive/braking force and the lateral
+  grip budget (`< 1` = slippery).
 
-Curriculum schedule:
-- Exponential moving average of completion rate
-- `alpha = clamp(smoothed_completion_rate / completion_rate_target, 0, 1)`
-- Active weights: `W = (1-alpha)*W_early + alpha*W_late`
+### Wall contacts
+By default (`termination.wall_contact_fatal: true`) the **first** wall contact ends the car
+immediately as a crash — so a car is only as good as the cleanest line it can hold, and the live
+field thins out visibly as cars make mistakes.
+
+A gentler budget model is available with `wall_contact_fatal: false`: each contact bleeds speed
+(`v ← v·collision_speed_retain`), bounces the car back to its last valid position, and counts
+against a budget, and the episode ends (flagged as a crash) only when `wall_contacts` exceeds
+`termination.max_wall_contacts`.
+
+### Fitness (per-step accumulation)
+Rewards progress, checkpoints, lap completion, a lap-quality bonus, and useful speed;
+penalizes elapsed time, collisions, stalling, control instability, and wall contacts.
+
+**Curriculum schedule:** an exponential moving average of the population completion rate drives
+`α = clamp(EMA / completion_rate_target, 0, 1)`, and the active weights blend the two weight sets
+as `W = (1−α)·W_early + α·W_late`. Early on, weights reward *any* progress; as the population
+starts finishing laps, weight shifts toward speed and lap time.
 
 ## Output Artifacts
-Each run creates `outputs/<timestamp>_<experiment>/` with:
-- `experiment_config.json`
-- `neat_config_used.txt`
-- `run_summary.json`
-- `generation_summary.csv`
-- `per_car_summary.csv`
-- `events.csv`
-- optional `per_step.parquet` (or csv fallback)
-- `best_genome.pkl`
-- `best_genome_metadata.json`
-- `champions/` per-generation champions
-- `plots/` (training curves, lap progression, distributions, crash heatmap, correlations)
-- `replays/` champion trajectory exports
+Each run creates `outputs/<timestamp>_<experiment>/` containing:
+- `experiment_config.json`, `neat_config_used.txt` — exact resolved configuration
+- `run_summary.json`, `generation_summary.csv`, `per_car_summary.csv`, `events.csv`
+- `per_step.parquet` (or CSV fallback) when `logging.save_per_step` is enabled
+- `best_genome.pkl` + `best_genome_metadata.json`, `champion_history.json`
+- `champions/` per-generation champion pickles
+- `plots/` — training curves, lap-time progression, fitness distributions, crash heatmap,
+  control diagnostics, evolution dynamics (speciation + network complexity), curriculum
+  progression, a behavioral-correlation heatmap, the champion's speed-colored trajectory, a
+  track speed heatmap, and correlation + analysis summaries
+- `replays/` — champion trajectory exports
 - `track_snapshot.png`
 
 ## Extending
-- Add tracks by dropping JSON files in `tracks/`
-- Add observation features in `simulation/sensors.py`
-- Adjust dynamics and constraints in `simulation/car.py`
-- Modify reward shaping in `evolution/fitness.py`
-- Add analytics in `analysis/plots.py`
+- **Tracks** — drop a JSON file in `tracks/` (see `tracks/baseline_loop.json` for the schema), or
+  generate one procedurally from a centerline with `neat_racer.simulation.track_builder` (see
+  `tools/generate_tracks.py`). Validate/visualize any track with `python main.py track`. Bundled
+  tracks: `baseline_loop`, `oval_speedway`, `twisty_circuit`, `serpentine_loop`, `technical_coil`.
+- **Observations** — add features in `simulation/sensors.py`
+- **Dynamics** — adjust the model/constraints in `simulation/car.py`
+- **Reward shaping** — edit `evolution/fitness.py`
+- **Analytics** — add plots in `analysis/plots.py`
 
 ## Testing
 ```bash
-pytest -q
+pytest -q                # unit + smoke tests
+ruff check neat_racer tests
 ```
-
-Smoke config for fast checks: `configs/smoke_experiment.yaml`.
