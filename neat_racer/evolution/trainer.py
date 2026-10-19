@@ -1,12 +1,11 @@
-"""NEAT training orchestration."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import pickle
-from pathlib import Path
 import time
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import neat
@@ -15,12 +14,12 @@ import numpy as np
 from neat_racer.config import ExperimentConfig
 from neat_racer.evolution.fitness import CurriculumScheduler, FitnessAccumulator
 from neat_racer.evolution.neat_config_builder import render_neat_config
-from neat_racer.simulation.env import network_controller, run_episode
+from neat_racer.simulation.env import CarAgent, network_controller, run_episode, run_population
 from neat_racer.simulation.track import load_track
 from neat_racer.telemetry.logger import ExperimentLogger, row_from_episode, step_rows_from_episode
-from neat_racer.telemetry.metrics_bus import MetricsBus
 from neat_racer.utils.filesystem import create_experiment_dir
 from neat_racer.visualization.renderer import LiveRenderer
+from neat_racer.visualization.track_plot import render_track
 
 
 @dataclass(slots=True)
@@ -31,11 +30,44 @@ class TrainingResult:
     best_lap_time: float | None
 
 
+# --- Parallel evaluation workers (module-level so they pickle under 'spawn') ---
+_WORKER_STATE: dict[str, Any] = {}
+
+
+def _parallel_worker_init(cfg: ExperimentConfig, track: Any, neat_cfg_path: str) -> None:
+    neat_config = neat.Config(
+        neat.DefaultGenome,
+        neat.DefaultReproduction,
+        neat.DefaultSpeciesSet,
+        neat.DefaultStagnation,
+        neat_cfg_path,
+    )
+    _WORKER_STATE["cfg"] = cfg
+    _WORKER_STATE["track"] = track
+    _WORKER_STATE["neat_config"] = neat_config
+
+
+def _parallel_worker_eval(task: tuple[int, int, Any, Any]) -> Any:
+    generation, genome_id, genome, weights = task
+    cfg = _WORKER_STATE["cfg"]
+    track = _WORKER_STATE["track"]
+    neat_config = _WORKER_STATE["neat_config"]
+    net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
+    accumulator = FitnessAccumulator(weights)
+    return run_episode(
+        cfg,
+        track,
+        generation=generation,
+        genome_id=genome_id,
+        controller=network_controller(net.activate),
+        fitness_step_fn=accumulator.step,
+    )
+
+
 class NeatTrainer:
     def __init__(self, cfg: ExperimentConfig) -> None:
         self.cfg = cfg
         self.track = load_track(cfg.simulation.track_file)
-        self.metrics_bus = MetricsBus()
         self.scheduler = CurriculumScheduler(cfg.fitness)
 
         self.run_dir = create_experiment_dir(cfg.logging.output_root, cfg.experiment.name)
@@ -43,7 +75,7 @@ class NeatTrainer:
 
         self.renderer: LiveRenderer | None = None
         if cfg.rendering.enabled and cfg.runtime.mode == "live":
-            self.renderer = LiveRenderer(cfg.rendering, self.metrics_bus)
+            self.renderer = LiveRenderer(cfg.rendering)
 
         self.best_genome = None
         self.best_genome_id = -1
@@ -58,11 +90,9 @@ class NeatTrainer:
         neat_cfg_path.write_text(neat_text, encoding="utf-8")
         self.logger.initialize(neat_text)
 
+        render_track(self.track, self.run_dir / "track_snapshot.png")
         if self.renderer:
             self.renderer.initialize(self.track)
-            self.renderer.save_track_snapshot(self.track, self.run_dir / "track_snapshot.png")
-        else:
-            self._save_track_snapshot_without_renderer()
 
         neat_config = neat.Config(
             neat.DefaultGenome,
@@ -79,10 +109,15 @@ class NeatTrainer:
 
         def eval_genomes(genomes: list[tuple[int, neat.DefaultGenome]], _: neat.Config) -> None:
             nonlocal generation_index
-            self._evaluate_generation(generation_index, genomes, neat_config)
+            self._evaluate_generation(generation_index, genomes, neat_config, population)
             generation_index += 1
 
-        winner = population.run(eval_genomes, self.cfg.runtime.max_generations)
+        winner = None
+        try:
+            winner = population.run(eval_genomes, self.cfg.runtime.max_generations)
+        except KeyboardInterrupt:
+            # Live window closed (or Ctrl-C): stop early but keep what we have.
+            print("Training interrupted — finalizing artifacts from completed generations.")
 
         if winner is not None and self.best_genome is None:
             self.best_genome = winner
@@ -99,44 +134,34 @@ class NeatTrainer:
             best_lap_time=self.best_lap_time,
         )
 
+    @staticmethod
+    def _genome_complexity(genome: neat.DefaultGenome) -> tuple[int, int]:
+        nodes = len(genome.nodes)
+        connections = sum(1 for c in genome.connections.values() if c.enabled)
+        return nodes, connections
+
     def _evaluate_generation(
         self,
         generation: int,
         genomes: list[tuple[int, neat.DefaultGenome]],
         neat_config: neat.Config,
+        population: neat.Population,
     ) -> None:
         t0 = time.perf_counter()
         weights = self.scheduler.current_weights()
-
-        results = []
         crash_count = 0
         lap_finish_count = 0
 
-        self.metrics_bus.update_generation(generation=generation, alive_count=len(genomes))
+        use_parallel = self.cfg.runtime.num_workers > 1 and self.renderer is None
+        if use_parallel:
+            results = self._run_episodes_parallel(generation, genomes, weights)
+        else:
+            results = self._run_episodes_serial(generation, genomes, neat_config, weights)
 
-        for i, (genome_id, genome) in enumerate(genomes):
-            net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
-            accumulator = FitnessAccumulator(weights)
-
-            def _fitness_step(features: dict) -> float:
-                return accumulator.step(features)
-
-            render_step = None
-            if self.renderer:
-                render_step = self._build_render_step(generation, genome_id)
-
-            episode = run_episode(
-                self.cfg,
-                self.track,
-                generation=generation,
-                genome_id=genome_id,
-                controller=network_controller(net.activate),
-                fitness_step_fn=_fitness_step,
-                render_step=render_step,
-            )
-
+        # Aggregation runs in genome order, so best-fitness tie-breaking and all
+        # logging match the serial path regardless of how results were produced.
+        for (genome_id, genome), episode in zip(genomes, results, strict=True):
             genome.fitness = episode.fitness
-            results.append(episode)
 
             if episode.crash_flag:
                 crash_count += 1
@@ -155,28 +180,10 @@ class NeatTrainer:
                 self.best_genome = genome
                 self.best_genome_id = genome_id
 
-            if episode.best_lap_time is not None:
-                if self.best_lap_time is None or episode.best_lap_time < self.best_lap_time:
-                    self.best_lap_time = episode.best_lap_time
-
-            self.metrics_bus.update_car(
-                genome_id=genome_id,
-                speed=episode.avg_speed,
-                steer=episode.steering_var,
-                throttle=episode.throttle_var,
-                brake=0.0,
-                checkpoint=episode.checkpoints_passed,
-                lap=episode.laps_completed,
-                sensor_angles_deg=self.cfg.sensors.angles_deg,
-                sensor_max_range=self.cfg.sensors.max_range,
-            )
-
-            if self.renderer:
-                controls = self.renderer.poll_events()
-                if controls.quit_requested:
-                    raise KeyboardInterrupt("Quit requested by user")
-
-            self.metrics_bus.update_generation(alive_count=max(0, len(genomes) - i - 1))
+            if episode.best_lap_time is not None and (
+                self.best_lap_time is None or episode.best_lap_time < self.best_lap_time
+            ):
+                self.best_lap_time = episode.best_lap_time
 
         fitnesses = np.asarray([r.fitness for r in results], dtype=float)
         progresses = np.asarray([r.max_progress for r in results], dtype=float)
@@ -188,6 +195,12 @@ class NeatTrainer:
 
         gen_best_idx = int(np.argmax(fitnesses))
         gen_best = results[gen_best_idx]
+
+        complexities = [self._genome_complexity(genome) for _, genome in genomes]
+        node_counts = np.asarray([c[0] for c in complexities], dtype=float)
+        conn_counts = np.asarray([c[1] for c in complexities], dtype=float)
+        best_nodes, best_conns = complexities[gen_best_idx]
+        num_species = len(getattr(population.species, "species", {}))
 
         row = {
             "generation": generation,
@@ -202,16 +215,13 @@ class NeatTrainer:
             "completion_rate": completion_rate,
             "crash_count": crash_count,
             "eval_time_sec": time.perf_counter() - t0,
+            "num_species": int(num_species),
+            "best_nodes": int(best_nodes),
+            "best_connections": int(best_conns),
+            "mean_nodes": float(np.mean(node_counts)),
+            "mean_connections": float(np.mean(conn_counts)),
         }
         self.logger.add_generation_row(row)
-
-        self.metrics_bus.update_generation(**row)
-        self.metrics_bus.update_run(
-            best_fitness=self.best_fitness,
-            best_lap_time=self.best_lap_time,
-            completion_rate_ema=self.scheduler.smoothed_completion_rate,
-            curriculum_alpha=self.scheduler.alpha,
-        )
 
         self.champion_history.append(
             {
@@ -225,33 +235,90 @@ class NeatTrainer:
 
         self._save_generation_champion(generation, genomes, int(gen_best.genome_id))
 
-    def _build_render_step(self, generation: int, genome_id: int):
-        def _render(track, car, sensor_vec, overlay):
-            if not self.renderer:
+    def _build_agents(
+        self,
+        generation: int,
+        genomes: list[tuple[int, neat.DefaultGenome]],
+        neat_config: neat.Config,
+        weights: Any,
+    ) -> list[CarAgent]:
+        agents: list[CarAgent] = []
+        for genome_id, genome in genomes:
+            net = neat.nn.FeedForwardNetwork.create(genome, neat_config)
+            accumulator = FitnessAccumulator(weights)
+            agents.append(
+                CarAgent(
+                    self.cfg,
+                    self.track,
+                    generation=generation,
+                    genome_id=genome_id,
+                    controller=network_controller(net.activate),
+                    fitness_step_fn=accumulator.step,
+                )
+            )
+        return agents
+
+    def _run_episodes_serial(
+        self,
+        generation: int,
+        genomes: list[tuple[int, neat.DefaultGenome]],
+        neat_config: neat.Config,
+        weights: Any,
+    ) -> list[Any]:
+        # The whole generation drives at once (lockstep). With a live renderer the viewer sees the
+        # entire field racing and crashing out; headless, it is identical to running them serially.
+        agents = self._build_agents(generation, genomes, neat_config, weights)
+        render_all = self._build_render_all(generation, len(agents)) if self.renderer else None
+        return run_population(self.cfg, self.track, agents, render_all=render_all)
+
+    def _run_episodes_parallel(
+        self,
+        generation: int,
+        genomes: list[tuple[int, neat.DefaultGenome]],
+        weights: Any,
+    ) -> list[Any]:
+        tasks = [(generation, genome_id, genome, weights) for genome_id, genome in genomes]
+        neat_cfg_path = str(self.run_dir / "neat_config_used.txt")
+        with ProcessPoolExecutor(
+            max_workers=self.cfg.runtime.num_workers,
+            initializer=_parallel_worker_init,
+            initargs=(self.cfg, self.track, neat_cfg_path),
+        ) as pool:
+            # pool.map preserves task order, so results stay aligned with `genomes`.
+            return list(pool.map(_parallel_worker_eval, tasks))
+
+    def _build_render_all(self, generation: int, total: int):
+        def _render(track, agents, tick):
+            r = self.renderer
+            if not r:
                 return
-            controls = self.renderer.poll_events()
-            while controls.paused and not controls.quit_requested:
-                self.renderer.draw_frame(track, [car], 0, sensor_vec, overlay)
-                controls = self.renderer.poll_events()
+            overlay = self._live_overlay(generation, agents, tick, total)
+            controls = r.frame(track, agents, overlay, tick)
             if controls.quit_requested:
                 raise KeyboardInterrupt("Quit requested by user")
-            self.metrics_bus.update_car(
-                genome_id=genome_id,
-                speed=car.speed,
-                steer=overlay.get("steer_cmd", car.steering_cmd),
-                throttle=overlay.get("throttle_cmd", 0.0),
-                brake=overlay.get("brake_cmd", 0.0),
-                checkpoint=car.checkpoint_index,
-                lap=car.lap_count,
-                sensor_angles_deg=self.cfg.sensors.angles_deg,
-                sensor_max_range=self.cfg.sensors.max_range,
-            )
-            self.metrics_bus.update_generation(generation=generation)
-            self.renderer.draw_frame(track, [car], 0, sensor_vec, overlay)
 
         return _render
 
-    def _save_generation_champion(self, generation: int, genomes: list[tuple[int, neat.DefaultGenome]], genome_id: int) -> None:
+    def _live_overlay(self, generation: int, agents: list[CarAgent], tick: int, total: int) -> dict:
+        alive = sum(1 for a in agents if a.alive)
+        gen_best = max((a.fitness_total for a in agents), default=0.0)
+        lead = max(agents, key=lambda a: a.fitness_total, default=None)
+        return {
+            "generation": generation,
+            "tick": tick,
+            "alive": alive,
+            "total": total,
+            "gen_best_fitness": gen_best,
+            "run_best_fitness": self.best_fitness if self.best_fitness > float("-inf") else 0.0,
+            "run_best_lap": self.best_lap_time,
+            "lead_speed": lead.car.speed if lead else 0.0,
+            "lead_lap": lead.car.lap_count if lead else 0,
+            "lead_checkpoint": lead.car.checkpoint_index if lead else 0,
+        }
+
+    def _save_generation_champion(
+        self, generation: int, genomes: list[tuple[int, neat.DefaultGenome]], genome_id: int
+    ) -> None:
         candidate = None
         for gid, genome in genomes:
             if gid == genome_id:
@@ -297,25 +364,3 @@ class NeatTrainer:
         }
         self.logger.set_run_summary(summary)
         self.logger.finalize()
-
-    def _save_track_snapshot_without_renderer(self) -> None:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        fig, ax = plt.subplots(figsize=(8, 6), dpi=130)
-        outer = np.vstack([self.track.outer_boundary, self.track.outer_boundary[0]])
-        inner = np.vstack([self.track.inner_boundary, self.track.inner_boundary[0]])
-        ax.plot(outer[:, 0], outer[:, 1], color="black", linewidth=2)
-        ax.plot(inner[:, 0], inner[:, 1], color="black", linewidth=2)
-        for cp in self.track.checkpoints:
-            ax.plot([cp[0][0], cp[1][0]], [cp[0][1], cp[1][1]], color="#3498db", linewidth=0.8)
-        sf = self.track.start_finish
-        ax.plot([sf[0][0], sf[1][0]], [sf[0][1], sf[1][1]], color="#e74c3c", linewidth=2)
-        ax.set_aspect("equal")
-        ax.set_title(self.track.name)
-        ax.grid(alpha=0.25)
-        fig.tight_layout()
-        fig.savefig(self.run_dir / "track_snapshot.png")
-        plt.close(fig)
