@@ -5,6 +5,13 @@ simulator for evolving control policies on closed-loop tracks. Cars perceive the
 through local ray sensors and a few internal-state features — there is no privileged optimal
 path — and evolution shapes a neural controller from "barely moves" to "drives clean laps."
 
+## Background
+This project was built for the **Northrop Grumman High School Involvement Partnership (HIP)
+Program**, where I was advised by Northrop Grumman engineers. The original platform was developed
+in mid-2026 over the course of the program. I came back to it a couple of months after the program
+ended and revised it substantially — reworking the simulation core, vectorizing the geometry, and
+rebuilding the live visualization — which is why the more recent commits exist.
+
 ## Highlights
 - 2D top-down racing simulation with deterministic, fixed-step kinematic physics
 - Local perception only (ray sensors + internal state), no global track knowledge
