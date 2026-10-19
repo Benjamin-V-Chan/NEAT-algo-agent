@@ -1,14 +1,4 @@
-"""Global constants used across NEAT Racer modules."""
-
 from __future__ import annotations
-
-from pathlib import Path
-
-PACKAGE_NAME = "neat_racer"
-DEFAULT_EXPERIMENT_CONFIG = Path("configs/default_experiment.yaml")
-DEFAULT_TRACK_PATH = Path("tracks/baseline_loop.json")
-DEFAULT_OUTPUT_ROOT = Path("outputs")
-DEFAULT_SAVED_ARTIFACTS_ROOT = Path("saved_artifacts")
 
 GENERATION_SUMMARY_COLUMNS = [
     "generation",
@@ -23,6 +13,12 @@ GENERATION_SUMMARY_COLUMNS = [
     "completion_rate",
     "crash_count",
     "eval_time_sec",
+    # Evolution dynamics (speciation + network topology growth).
+    "num_species",
+    "best_nodes",
+    "best_connections",
+    "mean_nodes",
+    "mean_connections",
 ]
 
 PER_CAR_SUMMARY_COLUMNS = [

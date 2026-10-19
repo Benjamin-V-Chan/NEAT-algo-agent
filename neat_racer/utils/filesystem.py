@@ -1,10 +1,8 @@
-"""Filesystem helpers for experiment output management."""
-
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
-import re
 
 
 def _slugify(name: str) -> str:
@@ -29,9 +27,3 @@ def create_experiment_dir(output_root: str | Path, experiment_name: str) -> Path
     for child in ("plots", "replays", "champions"):
         (candidate / child).mkdir(parents=True, exist_ok=True)
     return candidate
-
-
-def ensure_dir(path: str | Path) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p

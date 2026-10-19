@@ -1,5 +1,3 @@
-"""Typed configuration loading for NEAT Racer."""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -23,6 +21,11 @@ class RuntimeSection:
     max_generations: int = 50
     evaluate_laps_required: int = 1
     realtime_speed: float = 1.0
+    # Parallel genome evaluation. 1 = serial (default). > 1 evaluates a
+    # generation's episodes across that many worker processes (headless only);
+    # episodes are deterministic given their inputs, so results match the serial
+    # path for the default (noise-free) model.
+    num_workers: int = 1
 
 
 @dataclass(slots=True)
@@ -44,6 +47,8 @@ class CarSection:
     max_steer_angle_deg: float = 34.0
     steer_speed_decay: float = 0.55
     min_steer_gain: float = 0.2
+    # Fraction of speed retained when the car scrapes a wall (0 = full stop).
+    collision_speed_retain: float = 0.35
 
 
 @dataclass(slots=True)
@@ -56,13 +61,33 @@ class SensorSection:
 
 
 @dataclass(slots=True)
+class DynamicsSection:
+
+    # Grip-limited cornering: when the car's lateral acceleration (v * yaw_rate)
+    # exceeds the grip budget, the yaw rate is scaled down so the car washes out.
+    understeer_enabled: bool = False
+    max_lateral_accel: float = 900.0
+
+    # Gaussian noise added to the normalized [0, 1] sensor rays fed to the controller
+    # (telemetry/rendering rays stay clean). Reproducible under the run seed.
+    sensor_noise_enabled: bool = False
+    sensor_noise_std: float = 0.02
+
+    # Global grip multiplier scaling tractive/braking force (and the lateral grip
+    # budget). < 1.0 models a slippery surface, > 1.0 extra grip.
+    surface_grip: float = 1.0
+
+
+@dataclass(slots=True)
 class TerminationSection:
     stagnation_window_steps: int = 160
     min_progress_delta: float = 0.015
-    max_reverse_steps: int = 40
     max_spin_window_steps: int = 120
     spin_angular_velocity_threshold: float = 6.0
     max_wall_contacts: int = 16
+    # When True (default), the first wall contact ends the car immediately (a crash). When False,
+    # contacts bleed speed + bounce the car back and count against max_wall_contacts.
+    wall_contact_fatal: bool = True
 
 
 @dataclass(slots=True)
@@ -111,7 +136,6 @@ class FitnessSection:
 @dataclass(slots=True)
 class NeatSection:
     population_size: int = 120
-    config_file: str = "configs/neat_config.ini"
     activation_default: str = "tanh"
     hidden_nodes: int = 0
     survival_threshold: float = 0.2
@@ -131,9 +155,13 @@ class RenderingSection:
     enabled: bool = False
     width: int = 1400
     height: int = 900
-    hud_panel_width: int = 360
+    target_fps: int = 60
+    # How many simulation ticks advance per rendered frame. The display stays at
+    # target_fps; this is the "watch speed" (adjustable live with [ and ]). Higher
+    # values fast-forward through a generation without dropping the frame rate.
+    sim_ticks_per_frame: int = 3
     draw_sensors: bool = True
-    draw_checkpoints: bool = True
+    draw_trails: bool = True
 
 
 @dataclass(slots=True)
@@ -155,6 +183,7 @@ class ExperimentConfig:
     simulation: SimulationSection = field(default_factory=SimulationSection)
     car: CarSection = field(default_factory=CarSection)
     sensors: SensorSection = field(default_factory=SensorSection)
+    dynamics: DynamicsSection = field(default_factory=DynamicsSection)
     termination: TerminationSection = field(default_factory=TerminationSection)
     progress: ProgressSection = field(default_factory=ProgressSection)
     fitness: FitnessSection = field(default_factory=FitnessSection)
@@ -169,7 +198,7 @@ class ExperimentConfig:
 
 
 class ConfigError(ValueError):
-    """Raised when config files are malformed."""
+    pass
 
 
 def _merge_dataclass(dc: Any, updates: dict[str, Any]) -> Any:
@@ -223,3 +252,11 @@ def _validate_config(cfg: ExperimentConfig) -> None:
         raise ConfigError("simulation.dt must be positive")
     if cfg.runtime.max_generations <= 0:
         raise ConfigError("runtime.max_generations must be positive")
+    if cfg.runtime.num_workers < 1:
+        raise ConfigError("runtime.num_workers must be >= 1")
+    if cfg.dynamics.surface_grip <= 0:
+        raise ConfigError("dynamics.surface_grip must be positive")
+    if cfg.dynamics.sensor_noise_std < 0:
+        raise ConfigError("dynamics.sensor_noise_std must be non-negative")
+    if cfg.dynamics.max_lateral_accel <= 0:
+        raise ConfigError("dynamics.max_lateral_accel must be positive")
