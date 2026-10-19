@@ -1,21 +1,19 @@
-"""Track representation and loading."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 from neat_racer.constants import REQUIRED_TRACK_KEYS
 from neat_racer.simulation.geometry import (
-    Segment,
     as_np,
     closest_segment_index,
-    min_distance_to_segments,
-    point_in_polygon,
-    segments_from_polygon,
+    min_point_segment_distance_vec,
+    min_point_segment_distances_pop,
+    point_in_polygon_vec,
+    points_in_polygon_pop,
 )
 
 
@@ -31,18 +29,19 @@ class Track:
     spawn_pos: np.ndarray
     spawn_heading: float
     metadata: dict
+    _wall_seg_a: np.ndarray | None = field(default=None, compare=False, repr=False)
+    _wall_seg_b: np.ndarray | None = field(default=None, compare=False, repr=False)
+    _cl_seg_a: np.ndarray | None = field(default=None, compare=False, repr=False)
+    _cl_seg_b: np.ndarray | None = field(default=None, compare=False, repr=False)
 
     @property
-    def outer_segments(self) -> list[Segment]:
-        return segments_from_polygon(self.outer_boundary)
-
-    @property
-    def inner_segments(self) -> list[Segment]:
-        return segments_from_polygon(self.inner_boundary)
-
-    @property
-    def wall_segments(self) -> list[Segment]:
-        return self.outer_segments + self.inner_segments
+    def wall_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._wall_seg_a is None:
+            oa, ob = self.outer_boundary, np.roll(self.outer_boundary, -1, axis=0)
+            ia, ib = self.inner_boundary, np.roll(self.inner_boundary, -1, axis=0)
+            self._wall_seg_a = np.vstack([oa, ia])
+            self._wall_seg_b = np.vstack([ob, ib])
+        return self._wall_seg_a, self._wall_seg_b
 
     @property
     def checkpoint_centers(self) -> np.ndarray:
@@ -54,16 +53,24 @@ class Track:
         return (a + b) * 0.5
 
     def is_inside_corridor(self, point: np.ndarray) -> bool:
-        inside_outer = point_in_polygon(point, self.outer_boundary)
-        inside_inner = point_in_polygon(point, self.inner_boundary)
+        inside_outer = point_in_polygon_vec(point, self.outer_boundary)
+        inside_inner = point_in_polygon_vec(point, self.inner_boundary)
         return bool(inside_outer and not inside_inner)
 
     def collision_at(self, point: np.ndarray, radius: float) -> bool:
         if not self.is_inside_corridor(point):
             return True
-        d_outer = min_distance_to_segments(point, self.outer_segments)
-        d_inner = min_distance_to_segments(point, self.inner_segments)
-        return bool(min(d_outer, d_inner) <= radius)
+        seg_a, seg_b = self.wall_arrays
+        return bool(min_point_segment_distance_vec(point, seg_a, seg_b) <= radius)
+
+    def collision_mask(self, points: np.ndarray, radius: float) -> np.ndarray:
+        points = np.atleast_2d(np.asarray(points, dtype=float))
+        inside_outer = points_in_polygon_pop(points, self.outer_boundary)
+        inside_inner = points_in_polygon_pop(points, self.inner_boundary)
+        in_corridor = inside_outer & ~inside_inner
+        seg_a, seg_b = self.wall_arrays
+        near_wall = min_point_segment_distances_pop(points, seg_a, seg_b) <= radius
+        return (~in_corridor) | near_wall
 
     def local_alignment_cos(self, point: np.ndarray, heading: float) -> float:
         centerline = self._centerline()
@@ -75,6 +82,37 @@ class Track:
         tangent = tangent / norm
         heading_vec = np.array([np.cos(heading), np.sin(heading)], dtype=float)
         return float(np.clip(np.dot(heading_vec, tangent), -1.0, 1.0))
+
+    @property
+    def _centerline_segments(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._cl_seg_a is None:
+            cl = self._centerline()
+            self._cl_seg_a = cl[:-1]
+            self._cl_seg_b = cl[1:]
+        return self._cl_seg_a, self._cl_seg_b
+
+    def local_alignment_cos_pop(self, points: np.ndarray, headings: np.ndarray) -> np.ndarray:
+        from neat_racer.simulation.geometry import EPS
+
+        points = np.atleast_2d(np.asarray(points, dtype=float))
+        headings = np.asarray(headings, dtype=float).reshape(-1)
+        seg_a, seg_b = self._centerline_segments
+        ab = seg_b - seg_a  # (S, 2)
+        denom = np.einsum("sc,sc->s", ab, ab)  # (S,)
+        denom_safe = np.where(denom < EPS, 1.0, denom)
+        ap = points[:, None, :] - seg_a[None, :, :]  # (A, S, 2)
+        t = np.clip(np.einsum("asc,sc->as", ap, ab) / denom_safe[None, :], 0.0, 1.0)  # (A, S)
+        proj = seg_a[None, :, :] + t[:, :, None] * ab[None, :, :]  # (A, S, 2)
+        dist = np.sqrt(((points[:, None, :] - proj) ** 2).sum(axis=2))  # (A, S)
+        idx = dist.argmin(axis=1)  # (A,)
+
+        tangents = ab[idx]  # (A, 2)
+        norms = np.linalg.norm(tangents, axis=1)  # (A,)
+        safe_norms = np.where(norms < 1e-9, 1.0, norms)
+        unit = tangents / safe_norms[:, None]
+        heading_vec = np.stack([np.cos(headings), np.sin(headings)], axis=1)  # (A, 2)
+        cos = np.clip(np.einsum("ac,ac->a", heading_vec, unit), -1.0, 1.0)
+        return np.where(norms < 1e-9, 0.0, cos)
 
     def _centerline(self) -> np.ndarray:
         data = self.metadata.get("centerline")
@@ -89,7 +127,7 @@ class Track:
 
 
 class TrackError(ValueError):
-    """Raised when track definitions are malformed."""
+    pass
 
 
 def load_track(path: str | Path) -> Track:
