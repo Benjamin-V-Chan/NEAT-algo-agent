@@ -211,3 +211,9 @@ outputs/*
 !outputs/.gitkeep
 saved_artifacts/*
 !saved_artifacts/.gitkeep
+
+# Local working notes / assistant + scratch docs
+notes/
+docs/
+CLAUDE.md
+*.local.md

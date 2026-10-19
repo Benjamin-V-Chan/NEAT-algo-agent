@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neat-racer"
-version = "0.1.0"
+version = "0.2.0"
 description = "NEAT-driven autonomous car racing research platform"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,12 +16,15 @@ dependencies = [
   "matplotlib>=3.8",
   "PyYAML>=6.0",
   "neat-python>=0.92",
-  "pygame>=2.6"
 ]
 
 [project.optional-dependencies]
+# Live Pygame rendering. pygame-ce is the maintained fork and ships wheels for
+# current Python versions (including 3.13/3.14) where classic `pygame` fails to build.
+viz = ["pygame-ce>=2.5"]
+# Columnar per-step telemetry (Parquet). Falls back to CSV when absent.
 parquet = ["pyarrow>=15.0"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pyarrow>=15.0", "pygame-ce>=2.5"]
 
 [project.scripts]
 neat-racer = "neat_racer.cli:main"
@@ -35,3 +38,15 @@ include = ["neat_racer*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# SIM108: forcing long conditionals into a single ternary hurts readability here.
+ignore = ["B008", "SIM108"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B"]
