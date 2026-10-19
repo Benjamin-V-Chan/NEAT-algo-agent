@@ -1,16 +1,15 @@
-"""Episode simulation environment for one car on one track."""
-
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 import numpy as np
 
 from neat_racer.config import ExperimentConfig
 from neat_racer.simulation.car import CarControl, CarState, decode_network_outputs, integrate_car_step
+from neat_racer.simulation.geometry import raycast_min_distances_pop
 from neat_racer.simulation.progress import ProgressState, update_progress
-from neat_racer.simulation.sensors import build_observation, raycast_distances
+from neat_racer.simulation.sensors import build_observation
 from neat_racer.simulation.termination import TerminationManager
 from neat_racer.simulation.track import Track
 
@@ -73,6 +72,307 @@ class EpisodeResult:
 ControllerFn = Callable[[np.ndarray], CarControl]
 
 
+def _agent_rng(seed: int, genome_id: int) -> np.random.Generator:
+    mix = (int(seed) * 1_000_003) ^ (int(genome_id) & 0xFFFFFFFF)
+    return np.random.default_rng(mix & 0x7FFFFFFFFFFFFFFF)
+
+
+class CarAgent:
+
+    __slots__ = (
+        "cfg", "track", "generation", "genome_id", "controller", "fitness_step_fn", "rng",
+        "car", "progress_state", "termination", "max_steps", "dt", "n_rays",
+        "max_progress", "last_progress", "fitness_total", "useful_speed_reward",
+        "time_penalty", "wall_penalty", "completion_bonus_awarded", "crash_x", "crash_y",
+        "per_step", "events", "alive", "ticks", "last_fitness_delta",
+        "render_rays", "last_control",
+        "_pending_step", "_pending_sim_time", "_pending_speed_norm",
+    )
+
+    def __init__(
+        self,
+        cfg: ExperimentConfig,
+        track: Track,
+        generation: int,
+        genome_id: int,
+        controller: ControllerFn,
+        fitness_step_fn: Callable[[dict], float],
+    ) -> None:
+        self.cfg = cfg
+        self.track = track
+        self.generation = generation
+        self.genome_id = genome_id
+        self.controller = controller
+        self.fitness_step_fn = fitness_step_fn
+        self.rng = _agent_rng(cfg.experiment.seed, genome_id)
+
+        self.car = CarState(pos=track.spawn_pos.copy(), heading=track.spawn_heading)
+        self.progress_state = ProgressState(lap_start_time=0.0)
+        self.termination = TerminationManager(cfg.termination)
+        self.max_steps = cfg.simulation.max_steps_per_episode
+        self.dt = cfg.simulation.dt
+        self.n_rays = len(cfg.sensors.angles_deg)
+
+        self.max_progress = 0.0
+        self.last_progress = 0.0
+        self.fitness_total = 0.0
+        self.useful_speed_reward = 0.0
+        self.time_penalty = 0.0
+        self.wall_penalty = 0.0
+        self.completion_bonus_awarded = False
+        self.crash_x: float | None = None
+        self.crash_y: float | None = None
+        self.per_step: list[EpisodeStepTelemetry] = []
+        self.events: list[dict] = []
+        self.alive = True
+        self.ticks = 0
+        self.last_fitness_delta = 0.0
+        self.render_rays: np.ndarray | None = None
+        self.last_control: CarControl | None = None
+        # Scratch set in _act (pre-move) and consumed in _resolve (post-move).
+        self._pending_step = None
+        self._pending_sim_time = 0.0
+        self._pending_speed_norm = 0.0
+
+    def _act(self, tick: int, sensor_vector: np.ndarray, alignment: float | None) -> None:
+        cfg = self.cfg
+        car = self.car
+        sim_time = tick * self.dt
+        speed_norm = 0.0 if cfg.car.max_speed <= 1e-9 else car.speed / cfg.car.max_speed
+        progress_delta = car.progress_scalar - self.last_progress
+
+        # The clean rays double as the overlay the live viewer draws for this car.
+        self.render_rays = sensor_vector
+
+        obs = build_observation(
+            self.track, car, cfg.sensors, speed_norm, progress_delta,
+            sensor_vector=sensor_vector, alignment=alignment,
+        )
+        if cfg.dynamics.sensor_noise_enabled and cfg.dynamics.sensor_noise_std > 0:
+            noise = self.rng.normal(0.0, cfg.dynamics.sensor_noise_std, self.n_rays)
+            obs[: self.n_rays] = np.clip(obs[: self.n_rays] + noise, 0.0, 1.0)
+
+        control = self.controller(obs)
+        self.last_control = control
+        self._pending_step = integrate_car_step(car, control, cfg.car, self.dt, cfg.dynamics)
+        self._pending_sim_time = sim_time
+        self._pending_speed_norm = speed_norm
+
+    def _resolve(self, tick: int, collision_flag: bool) -> bool:
+        cfg = self.cfg
+        track = self.track
+        car = self.car
+        step = self._pending_step
+        sim_time = self._pending_sim_time
+        speed_norm = self._pending_speed_norm
+        control = self.last_control
+
+        # Wall contact. In fatal mode (default) the first touch ends the car; otherwise contacts
+        # bleed speed, bounce the car back, and count against a budget (see TerminationManager).
+        fatal = cfg.termination.wall_contact_fatal and collision_flag
+        if collision_flag:
+            if not car.in_contact:
+                car.wall_contacts += 1
+            car.in_contact = True
+            car.pos = step.prev_pos.copy()
+            car.speed *= cfg.car.collision_speed_retain
+        else:
+            car.in_contact = False
+
+        current_progress, progress_events = update_progress(
+            track, self.progress_state, step.prev_pos, step.current_pos, sim_time, cfg.progress
+        )
+        car.progress_scalar = current_progress
+        car.checkpoint_index = self.progress_state.next_checkpoint_idx
+        car.lap_count = self.progress_state.laps_completed
+        self.max_progress = max(self.max_progress, current_progress)
+
+        step_features = {
+            "progress_scalar": current_progress,
+            "progress_delta": current_progress - self.last_progress,
+            "checkpoints_passed": self.progress_state.checkpoints_passed_total,
+            "laps_completed": self.progress_state.laps_completed,
+            "speed_norm": speed_norm,
+            "time_norm": tick / self.max_steps,
+            "collision_flag": collision_flag,
+            "stagnation_events": car.stall_events,
+            "wall_contacts": car.wall_contacts,
+            "steering_cmd": car.steering_cmd,
+            "throttle_cmd": control.throttle,
+            "brake_cmd": control.brake,
+            "best_lap_time": self.progress_state.best_lap_time,
+            "lap_completed_now": bool(progress_events.get("lap_completed_now", False)),
+        }
+        fitness_delta = self.fitness_step_fn(step_features)
+        self.fitness_total += fitness_delta
+        self.last_fitness_delta = fitness_delta
+
+        self.useful_speed_reward += max(0.0, current_progress - self.last_progress) * car.speed
+        self.time_penalty += tick / self.max_steps
+        self.wall_penalty += 1.0 if collision_flag else 0.0
+
+        event_code = "none"
+        if progress_events.get("checkpoint_crossed"):
+            event_code = "checkpoint"
+            self._add_event(tick, sim_time, "checkpoint_crossed", progress_events.get("checkpoint_index"))
+        if progress_events.get("lap_completed"):
+            self.completion_bonus_awarded = True
+            event_code = "lap"
+            self._add_event(tick, sim_time, "lap_completed", progress_events.get("lap_time"))
+
+        if cfg.logging.save_per_step:
+            self._append_step(tick, sim_time, control, event_code, fitness_delta)
+
+        self.last_progress = current_progress
+        self.ticks += 1
+
+        # Termination: fatal wall, or the usual stagnation / spin / contact-budget checks.
+        reason: str | None = None
+        if fatal:
+            reason = "wall_crash"
+        else:
+            term = self.termination.update(car, current_progress)
+            if term.done:
+                reason = term.reason
+
+        if reason is not None:
+            car.alive = False
+            self.alive = False
+            if reason in ("wall_crash", "too_many_wall_contacts"):
+                car.crashed = True
+                self.crash_x, self.crash_y = float(car.pos[0]), float(car.pos[1])
+            self._add_event(tick, sim_time, "termination", reason)
+
+        return self.alive
+
+    def _add_event(self, tick: int, sim_time: float, event_type: str, value) -> None:
+        self.events.append(
+            {
+                "generation": self.generation,
+                "genome_id": self.genome_id,
+                "tick": tick,
+                "sim_time": sim_time,
+                "event_type": event_type,
+                "event_value": value,
+                "x": float(self.car.pos[0]),
+                "y": float(self.car.pos[1]),
+                "details": "",
+            }
+        )
+
+    def _append_step(
+        self, tick: int, sim_time: float, control: CarControl, event_code: str, fitness_delta: float
+    ) -> None:
+        car = self.car
+        rays = self.render_rays if self.render_rays is not None else np.zeros(self.n_rays)
+        self.per_step.append(
+            EpisodeStepTelemetry(
+                tick=tick,
+                sim_time=sim_time,
+                generation=self.generation,
+                genome_id=self.genome_id,
+                car_id=self.genome_id,
+                x=float(car.pos[0]),
+                y=float(car.pos[1]),
+                heading=float(car.heading),
+                speed=float(car.speed),
+                accel=float(car.acceleration),
+                steering_cmd=float(car.steering_cmd),
+                throttle_cmd=float(control.throttle),
+                brake_cmd=float(control.brake),
+                sensor_vector=[float(v) for v in rays],
+                checkpoint_idx=car.checkpoint_index,
+                lap_count=car.lap_count,
+                progress_scalar=float(car.progress_scalar),
+                alive=self.alive,
+                collision_flag=bool(self.car.in_contact),
+                event_code=event_code,
+                fitness_delta=float(fitness_delta),
+            )
+        )
+
+    def finish(self) -> EpisodeResult:
+        car = self.car
+        steer_arr = np.asarray(car.steering_history, dtype=float) if car.steering_history else np.asarray([0.0])
+        throttle_arr = np.asarray(car.throttle_history, dtype=float) if car.throttle_history else np.asarray([0.0])
+        avg_speed = car.speed_integral / max(1, car.steps)
+        instability_penalty = float(
+            np.var(steer_arr) + car.steering_jerk_accum / max(1, car.steps) + np.var(throttle_arr)
+        )
+        return EpisodeResult(
+            generation=self.generation,
+            genome_id=self.genome_id,
+            fitness=float(self.fitness_total),
+            crash_flag=bool(car.crashed),
+            crash_x=self.crash_x,
+            crash_y=self.crash_y,
+            max_progress=float(self.max_progress),
+            checkpoints_passed=self.progress_state.checkpoints_passed_total,
+            laps_completed=self.progress_state.laps_completed,
+            best_lap_time=self.progress_state.best_lap_time,
+            survival_time=float(car.steps * self.dt),
+            distance_traveled=float(car.total_distance),
+            avg_speed=float(avg_speed),
+            max_speed=float(car.max_speed),
+            wall_contacts=car.wall_contacts,
+            stagnation_events=car.stall_events,
+            steering_var=float(np.var(steer_arr)),
+            steering_jerk=float(car.steering_jerk_accum / max(1, car.steps)),
+            throttle_var=float(np.var(throttle_arr)),
+            completion_bonus_awarded=self.completion_bonus_awarded,
+            useful_speed_reward=float(self.useful_speed_reward),
+            time_penalty=float(self.time_penalty),
+            instability_penalty=instability_penalty,
+            wall_penalty=float(self.wall_penalty),
+            per_step=self.per_step,
+            events=self.events,
+        )
+
+
+RenderAllFn = Callable[[Track, list[CarAgent], int], None]
+
+
+def run_population(
+    cfg: ExperimentConfig,
+    track: Track,
+    agents: list[CarAgent],
+    render_all: RenderAllFn | None = None,
+) -> list[EpisodeResult]:
+    max_steps = cfg.simulation.max_steps_per_episode
+    angles = np.radians(np.asarray(cfg.sensors.angles_deg, dtype=float))  # (R,)
+    max_range = cfg.sensors.max_range
+    radius = cfg.car.collision_radius
+    want_align = cfg.sensors.include_alignment_feature
+    seg_a, seg_b = track.wall_arrays
+
+    for tick in range(max_steps):
+        alive = [a for a in agents if a.alive]
+        if not alive:
+            break
+
+        origins = np.array([a.car.pos for a in alive], dtype=float)  # (A, 2)
+        headings = np.array([a.car.heading for a in alive], dtype=float)  # (A,)
+
+        theta = headings[:, None] + angles[None, :]  # (A, R)
+        ray_dirs = np.stack([np.cos(theta), np.sin(theta)], axis=-1)  # (A, R, 2)
+        dists = raycast_min_distances_pop(origins, ray_dirs, seg_a, seg_b, max_range)
+        ray_norm = np.clip(dists / max_range, 0.0, 1.0)  # (A, R)
+        alignments = track.local_alignment_cos_pop(origins, headings) if want_align else None
+
+        for i, agent in enumerate(alive):
+            agent._act(tick, ray_norm[i], float(alignments[i]) if want_align else None)
+
+        new_positions = np.array([a.car.pos for a in alive], dtype=float)  # (A, 2)
+        collisions = track.collision_mask(new_positions, radius)  # (A,)
+        for i, agent in enumerate(alive):
+            agent._resolve(tick, bool(collisions[i]))
+
+        if render_all is not None:
+            render_all(track, agents, tick)
+
+    return [agent.finish() for agent in agents]
+
+
 def run_episode(
     cfg: ExperimentConfig,
     track: Track,
@@ -80,220 +380,9 @@ def run_episode(
     genome_id: int,
     controller: ControllerFn,
     fitness_step_fn: Callable[[dict], float],
-    render_step: Callable[[Track, CarState, np.ndarray, dict], None] | None = None,
 ) -> EpisodeResult:
-    car = CarState(pos=track.spawn_pos.copy(), heading=track.spawn_heading)
-    progress_state = ProgressState(lap_start_time=0.0)
-    termination = TerminationManager(cfg.termination)
-
-    max_steps = cfg.simulation.max_steps_per_episode
-    dt = cfg.simulation.dt
-
-    max_progress = 0.0
-    last_progress = 0.0
-    fitness_total = 0.0
-    useful_speed_reward = 0.0
-    time_penalty = 0.0
-    wall_penalty = 0.0
-    completion_bonus_awarded = False
-    crash_x = None
-    crash_y = None
-
-    per_step: list[EpisodeStepTelemetry] = []
-    events: list[dict] = []
-
-    for tick in range(max_steps):
-        sim_time = tick * dt
-        speed_norm = 0.0 if cfg.car.max_speed <= 1e-9 else car.speed / cfg.car.max_speed
-        progress_delta = car.progress_scalar - last_progress
-
-        obs = build_observation(track, car, cfg.sensors, speed_norm, progress_delta)
-        control = controller(obs)
-
-        step = integrate_car_step(car, control, cfg.car, dt)
-
-        collision_flag = track.collision_at(car.pos, cfg.car.collision_radius)
-        if collision_flag:
-            car.wall_contacts += 1
-
-        current_progress, progress_events = update_progress(
-            track,
-            progress_state,
-            step.prev_pos,
-            step.current_pos,
-            sim_time,
-            cfg.progress,
-        )
-        car.progress_scalar = current_progress
-        car.checkpoint_index = progress_state.next_checkpoint_idx
-        car.lap_count = progress_state.laps_completed
-        max_progress = max(max_progress, current_progress)
-
-        step_features = {
-            "progress_scalar": current_progress,
-            "progress_delta": current_progress - last_progress,
-            "checkpoints_passed": progress_state.checkpoints_passed_total,
-            "laps_completed": progress_state.laps_completed,
-            "speed_norm": speed_norm,
-            "time_norm": tick / max_steps,
-            "collision_flag": collision_flag,
-            "stagnation_events": car.stall_events,
-            "wall_contacts": car.wall_contacts,
-            "steering_cmd": car.steering_cmd,
-            "throttle_cmd": control.throttle,
-            "brake_cmd": control.brake,
-            "best_lap_time": progress_state.best_lap_time,
-            "lap_completed_now": bool(progress_events.get("lap_completed_now", False)),
-        }
-        fitness_delta = fitness_step_fn(step_features)
-        fitness_total += fitness_delta
-
-        useful_speed_reward += max(0.0, current_progress - last_progress) * car.speed
-        time_penalty += tick / max_steps
-        wall_penalty += 1.0 if collision_flag else 0.0
-
-        event_code = "none"
-        if progress_events.get("checkpoint_crossed"):
-            event_code = "checkpoint"
-            events.append(
-                {
-                    "generation": generation,
-                    "genome_id": genome_id,
-                    "tick": tick,
-                    "sim_time": sim_time,
-                    "event_type": "checkpoint_crossed",
-                    "event_value": progress_events.get("checkpoint_index"),
-                    "x": float(car.pos[0]),
-                    "y": float(car.pos[1]),
-                    "details": "",
-                }
-            )
-
-        if progress_events.get("lap_completed"):
-            completion_bonus_awarded = True
-            event_code = "lap"
-            events.append(
-                {
-                    "generation": generation,
-                    "genome_id": genome_id,
-                    "tick": tick,
-                    "sim_time": sim_time,
-                    "event_type": "lap_completed",
-                    "event_value": progress_events.get("lap_time"),
-                    "x": float(car.pos[0]),
-                    "y": float(car.pos[1]),
-                    "details": "",
-                }
-            )
-
-        if render_step:
-            sensor_vec = raycast_distances(track, car.pos, car.heading, cfg.sensors)
-            render_step(
-                track,
-                car,
-                sensor_vec,
-                {
-                    "generation": generation,
-                    "genome_id": genome_id,
-                    "tick": tick,
-                    "fitness": fitness_total,
-                    "max_progress": max_progress,
-                    "steer_cmd": float(car.steering_cmd),
-                    "throttle_cmd": float(control.throttle),
-                    "brake_cmd": float(control.brake),
-                },
-            )
-
-        if cfg.logging.save_per_step:
-            sensor_vec = raycast_distances(track, car.pos, car.heading, cfg.sensors)
-            per_step.append(
-                EpisodeStepTelemetry(
-                    tick=tick,
-                    sim_time=sim_time,
-                    generation=generation,
-                    genome_id=genome_id,
-                    car_id=genome_id,
-                    x=float(car.pos[0]),
-                    y=float(car.pos[1]),
-                    heading=float(car.heading),
-                    speed=float(car.speed),
-                    accel=float(car.acceleration),
-                    steering_cmd=float(car.steering_cmd),
-                    throttle_cmd=float(control.throttle),
-                    brake_cmd=float(control.brake),
-                    sensor_vector=[float(v) for v in sensor_vec],
-                    checkpoint_idx=car.checkpoint_index,
-                    lap_count=car.lap_count,
-                    progress_scalar=float(car.progress_scalar),
-                    alive=True,
-                    collision_flag=collision_flag,
-                    event_code=event_code,
-                    fitness_delta=float(fitness_delta),
-                )
-            )
-
-        last_progress = current_progress
-
-        if collision_flag:
-            car.crashed = True
-            car.alive = False
-            crash_x, crash_y = float(car.pos[0]), float(car.pos[1])
-
-        term_result = termination.update(car, current_progress)
-        if term_result.done:
-            car.alive = False
-            events.append(
-                {
-                    "generation": generation,
-                    "genome_id": genome_id,
-                    "tick": tick,
-                    "sim_time": sim_time,
-                    "event_type": "termination",
-                    "event_value": term_result.reason,
-                    "x": float(car.pos[0]),
-                    "y": float(car.pos[1]),
-                    "details": "",
-                }
-            )
-
-        if not car.alive:
-            break
-
-    steer_arr = np.asarray(car.steering_history, dtype=float) if car.steering_history else np.asarray([0.0])
-    throttle_arr = np.asarray(car.throttle_history, dtype=float) if car.throttle_history else np.asarray([0.0])
-
-    avg_speed = car.speed_integral / max(1, car.steps)
-
-    instability_penalty = float(np.var(steer_arr) + car.steering_jerk_accum / max(1, car.steps) + np.var(throttle_arr))
-
-    return EpisodeResult(
-        generation=generation,
-        genome_id=genome_id,
-        fitness=float(fitness_total),
-        crash_flag=bool(car.crashed),
-        crash_x=crash_x,
-        crash_y=crash_y,
-        max_progress=float(max_progress),
-        checkpoints_passed=progress_state.checkpoints_passed_total,
-        laps_completed=progress_state.laps_completed,
-        best_lap_time=progress_state.best_lap_time,
-        survival_time=float(car.steps * dt),
-        distance_traveled=float(car.total_distance),
-        avg_speed=float(avg_speed),
-        max_speed=float(car.max_speed),
-        wall_contacts=car.wall_contacts,
-        stagnation_events=car.stall_events,
-        steering_var=float(np.var(steer_arr)),
-        steering_jerk=float(car.steering_jerk_accum / max(1, car.steps)),
-        throttle_var=float(np.var(throttle_arr)),
-        completion_bonus_awarded=completion_bonus_awarded,
-        useful_speed_reward=float(useful_speed_reward),
-        time_penalty=float(time_penalty),
-        instability_penalty=float(instability_penalty),
-        wall_penalty=float(wall_penalty),
-        per_step=per_step,
-        events=events,
-    )
+    agent = CarAgent(cfg, track, generation, genome_id, controller, fitness_step_fn)
+    return run_population(cfg, track, [agent])[0]
 
 
 def network_controller(net_activate: Callable[[list[float]], list[float]]) -> ControllerFn:
