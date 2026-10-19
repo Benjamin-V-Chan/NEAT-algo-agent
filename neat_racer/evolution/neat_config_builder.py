@@ -1,8 +1,4 @@
-"""Build neat-python config text from experiment settings."""
-
 from __future__ import annotations
-
-from pathlib import Path
 
 from neat_racer.config import ExperimentConfig
 from neat_racer.constants import NEAT_OUTPUT_COUNT
@@ -94,8 +90,3 @@ min_species_size   = 2
 """
 
 
-def write_neat_config(cfg: ExperimentConfig, path: str | Path) -> Path:
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_neat_config(cfg), encoding="utf-8")
-    return out_path

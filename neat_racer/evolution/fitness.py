@@ -1,10 +1,8 @@
-"""Fitness shaping with curriculum-aware weight blending."""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from neat_racer.config import FitnessSection, FitnessWeights
+from neat_racer.config import FitnessSection
 from neat_racer.utils.math_utils import clamp
 
 
@@ -21,10 +19,6 @@ class ActiveFitnessWeights:
     w_offline: float
     w_completion_bonus: float
     w_best_lap_bonus: float
-
-    @classmethod
-    def from_weights(cls, w: FitnessWeights) -> "ActiveFitnessWeights":
-        return cls(**asdict(w))
 
 
 class CurriculumScheduler:
@@ -59,9 +53,16 @@ class FitnessAccumulator:
         self.prev_wall_contacts = 0
         self.prev_steer = 0.0
         self.prev_throttle = 0.0
+        # Highest progress scalar reached so far. Progress is only rewarded when the car sets a NEW
+        # maximum, so re-covering ground it has already driven earns nothing. This is the key
+        # anti-reward-hacking rule: oscillating back and forth (or driving circles) within a sector
+        # no longer farms w_progress, because the progress scalar never exceeds its prior peak.
+        self.max_progress = 0.0
 
     def step(self, features: dict) -> float:
-        progress_delta = max(0.0, float(features["progress_delta"]))
+        progress_scalar = float(features["progress_scalar"])
+        progress_delta = max(0.0, progress_scalar - self.max_progress)
+        self.max_progress = max(self.max_progress, progress_scalar)
         checkpoints_passed = int(features["checkpoints_passed"])
         laps_completed = int(features["laps_completed"])
         speed_norm = float(features["speed_norm"])
