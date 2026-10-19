@@ -8,7 +8,7 @@ path — and evolution shapes a neural controller from "barely moves" to "drives
 ## Background
 This project was built for the **Northrop Grumman High School Involvement Partnership (HIP)
 Program**, where I was advised by Northrop Grumman engineers. The original platform was developed
-in mid-2026 over the course of the program. I came back to it a couple of months after the program
+from 2025 to mid-2026 over the course of the program. I came back to it a couple of months after the program
 ended and revised it substantially — reworking the simulation core, vectorizing the geometry, and
 rebuilding the live visualization — which is why the more recent commits exist.
 
