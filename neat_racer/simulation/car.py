@@ -1,13 +1,11 @@
-"""Car state and vehicle integration model."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from neat_racer.config import CarSection
+from neat_racer.config import CarSection, DynamicsSection
 from neat_racer.utils.math_utils import clamp, clamp01
 
 
@@ -29,6 +27,7 @@ class CarState:
     alive: bool = True
     crashed: bool = False
     wall_contacts: int = 0
+    in_contact: bool = False
     lap_count: int = 0
     progress_scalar: float = 0.0
     checkpoint_index: int = 0
@@ -37,24 +36,10 @@ class CarState:
     speed_integral: float = 0.0
     steps: int = 0
     stall_events: int = 0
-    reverse_steps: int = 0
     steering_history: list[float] = field(default_factory=list)
     throttle_history: list[float] = field(default_factory=list)
     steering_jerk_accum: float = 0.0
     last_steer: float = 0.0
-
-    def as_dict(self) -> dict:
-        return {
-            "x": float(self.pos[0]),
-            "y": float(self.pos[1]),
-            "heading": float(self.heading),
-            "speed": float(self.speed),
-            "acceleration": float(self.acceleration),
-            "steering_cmd": float(self.steering_cmd),
-            "yaw_rate": float(self.yaw_rate),
-            "alive": bool(self.alive),
-            "crashed": bool(self.crashed),
-        }
 
 
 @dataclass(slots=True)
@@ -75,16 +60,25 @@ def decode_network_outputs(outputs: list[float]) -> CarControl:
     return CarControl(steer=steer, throttle=throttle, brake=brake)
 
 
-def integrate_car_step(state: CarState, control: CarControl, car_cfg: CarSection, dt: float) -> StepResult:
+def integrate_car_step(
+    state: CarState,
+    control: CarControl,
+    car_cfg: CarSection,
+    dt: float,
+    dynamics: DynamicsSection | None = None,
+) -> StepResult:
     prev_pos = state.pos.copy()
 
     steer = clamp(control.steer, -1.0, 1.0)
     throttle = clamp01(control.throttle)
     brake = clamp01(control.brake)
 
+    # Global grip multiplier scales tractive/braking force; resistive drag and
+    # rolling losses are unaffected. grip == 1.0 reproduces the base model exactly.
+    grip = dynamics.surface_grip if dynamics is not None else 1.0
+    traction = car_cfg.acceleration_max * throttle - car_cfg.braking_max * brake
     a_long = (
-        car_cfg.acceleration_max * throttle
-        - car_cfg.braking_max * brake
+        grip * traction
         - car_cfg.drag_coeff * state.speed
         - car_cfg.rolling_coeff * (1.0 if state.speed > 0 else 0.0)
     )
@@ -93,7 +87,18 @@ def integrate_car_step(state: CarState, control: CarControl, car_cfg: CarSection
     delta = math.radians(car_cfg.max_steer_angle_deg) * steer
     speed_ratio = 0.0 if car_cfg.max_speed <= 1e-9 else next_speed / car_cfg.max_speed
     steer_gain = max(car_cfg.min_steer_gain, 1.0 - car_cfg.steer_speed_decay * speed_ratio)
-    yaw_rate = (0.0 if abs(car_cfg.wheelbase) < 1e-9 else (next_speed / car_cfg.wheelbase) * math.tan(delta) * steer_gain)
+    if abs(car_cfg.wheelbase) < 1e-9:
+        yaw_rate = 0.0
+    else:
+        yaw_rate = (next_speed / car_cfg.wheelbase) * math.tan(delta) * steer_gain
+
+    # Grip-limited cornering (understeer): if demanded lateral acceleration exceeds
+    # the grip budget, scale the yaw rate down so the car washes wide.
+    if dynamics is not None and dynamics.understeer_enabled:
+        lateral_accel = abs(next_speed * yaw_rate)
+        grip_budget = dynamics.max_lateral_accel * grip
+        if grip_budget > 1e-9 and lateral_accel > grip_budget:
+            yaw_rate *= grip_budget / lateral_accel
 
     heading = state.heading + yaw_rate * dt
     dx = next_speed * math.cos(heading) * dt
