@@ -1,5 +1,3 @@
-"""Data loading helpers for experiment analysis."""
-
 from __future__ import annotations
 
 from pathlib import Path
