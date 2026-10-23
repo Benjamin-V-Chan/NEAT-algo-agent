@@ -67,9 +67,20 @@ class EpisodeResult:
     wall_penalty: float
     per_step: list[EpisodeStepTelemetry] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
+    track_id: str = ""
+    env_steps: int = 0
 
 
 ControllerFn = Callable[[np.ndarray], CarControl]
+
+
+@dataclass(slots=True)
+class PolicySnapshot:
+    # A trainer's current policy, handed to evaluation hooks at policy boundaries (end of a NEAT
+    # generation, or a PPO update). env_steps counts every training tick consumed so far.
+    env_steps: int
+    train_time_sec: float
+    make_controller: Callable[[], ControllerFn]
 
 
 def _agent_rng(seed: int, genome_id: int) -> np.random.Generator:
@@ -135,6 +146,9 @@ class CarAgent:
         self._pending_speed_norm = 0.0
 
     def _act(self, tick: int, sensor_vector: np.ndarray, alignment: float | None) -> None:
+        self._apply(self.controller(self._observe(tick, sensor_vector, alignment)))
+
+    def _observe(self, tick: int, sensor_vector: np.ndarray, alignment: float | None) -> np.ndarray:
         cfg = self.cfg
         car = self.car
         sim_time = tick * self.dt
@@ -152,11 +166,13 @@ class CarAgent:
             noise = self.rng.normal(0.0, cfg.dynamics.sensor_noise_std, self.n_rays)
             obs[: self.n_rays] = np.clip(obs[: self.n_rays] + noise, 0.0, 1.0)
 
-        control = self.controller(obs)
-        self.last_control = control
-        self._pending_step = integrate_car_step(car, control, cfg.car, self.dt, cfg.dynamics)
         self._pending_sim_time = sim_time
         self._pending_speed_norm = speed_norm
+        return obs
+
+    def _apply(self, control: CarControl) -> None:
+        self.last_control = control
+        self._pending_step = integrate_car_step(self.car, control, self.cfg.car, self.dt, self.cfg.dynamics)
 
     def _resolve(self, tick: int, collision_flag: bool) -> bool:
         cfg = self.cfg
@@ -326,10 +342,30 @@ class CarAgent:
             wall_penalty=float(self.wall_penalty),
             per_step=self.per_step,
             events=self.events,
+            track_id=self.track.track_id,
+            env_steps=self.ticks,
         )
 
 
 RenderAllFn = Callable[[Track, list[CarAgent], int], None]
+
+
+def sense_population(
+    cfg: ExperimentConfig, track: Track, agents: list[CarAgent]
+) -> tuple[np.ndarray, np.ndarray | None]:
+    angles = np.radians(np.asarray(cfg.sensors.angles_deg, dtype=float))  # (R,)
+    max_range = cfg.sensors.max_range
+    seg_a, seg_b = track.wall_arrays
+
+    origins = np.array([a.car.pos for a in agents], dtype=float)  # (A, 2)
+    headings = np.array([a.car.heading for a in agents], dtype=float)  # (A,)
+
+    theta = headings[:, None] + angles[None, :]  # (A, R)
+    ray_dirs = np.stack([np.cos(theta), np.sin(theta)], axis=-1)  # (A, R, 2)
+    dists = raycast_min_distances_pop(origins, ray_dirs, seg_a, seg_b, max_range)
+    ray_norm = np.clip(dists / max_range, 0.0, 1.0)  # (A, R)
+    alignments = track.local_alignment_cos_pop(origins, headings) if cfg.sensors.include_alignment_feature else None
+    return ray_norm, alignments
 
 
 def run_population(
@@ -339,28 +375,16 @@ def run_population(
     render_all: RenderAllFn | None = None,
 ) -> list[EpisodeResult]:
     max_steps = cfg.simulation.max_steps_per_episode
-    angles = np.radians(np.asarray(cfg.sensors.angles_deg, dtype=float))  # (R,)
-    max_range = cfg.sensors.max_range
     radius = cfg.car.collision_radius
-    want_align = cfg.sensors.include_alignment_feature
-    seg_a, seg_b = track.wall_arrays
 
     for tick in range(max_steps):
         alive = [a for a in agents if a.alive]
         if not alive:
             break
 
-        origins = np.array([a.car.pos for a in alive], dtype=float)  # (A, 2)
-        headings = np.array([a.car.heading for a in alive], dtype=float)  # (A,)
-
-        theta = headings[:, None] + angles[None, :]  # (A, R)
-        ray_dirs = np.stack([np.cos(theta), np.sin(theta)], axis=-1)  # (A, R, 2)
-        dists = raycast_min_distances_pop(origins, ray_dirs, seg_a, seg_b, max_range)
-        ray_norm = np.clip(dists / max_range, 0.0, 1.0)  # (A, R)
-        alignments = track.local_alignment_cos_pop(origins, headings) if want_align else None
-
+        ray_norm, alignments = sense_population(cfg, track, alive)
         for i, agent in enumerate(alive):
-            agent._act(tick, ray_norm[i], float(alignments[i]) if want_align else None)
+            agent._act(tick, ray_norm[i], None if alignments is None else float(alignments[i]))
 
         new_positions = np.array([a.car.pos for a in alive], dtype=float)  # (A, 2)
         collisions = track.collision_mask(new_positions, radius)  # (A,)

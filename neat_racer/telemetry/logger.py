@@ -105,6 +105,7 @@ def row_from_episode(result: Any) -> dict[str, Any]:
         "steering_var": result.steering_var,
         "steering_jerk": result.steering_jerk,
         "throttle_var": result.throttle_var,
+        "track_id": result.track_id,
     }
 
 

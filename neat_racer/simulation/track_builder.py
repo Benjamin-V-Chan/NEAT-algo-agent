@@ -30,7 +30,6 @@ def resample_closed(points: np.ndarray, n: int) -> np.ndarray:
 
 
 def _constant_width_offsets(centerline: np.ndarray, half_width: float) -> tuple[np.ndarray, np.ndarray]:
-    centroid = centerline.mean(axis=0)
     nxt = np.roll(centerline, -1, axis=0)
     prv = np.roll(centerline, 1, axis=0)
 
@@ -38,13 +37,11 @@ def _constant_width_offsets(centerline: np.ndarray, half_width: float) -> tuple[
     length = np.linalg.norm(tangent, axis=1, keepdims=True)
     length = np.where(length < 1e-9, 1.0, length)
     unit_t = tangent / length
-    # Left-hand unit normal of the tangent.
-    normal = np.column_stack([-unit_t[:, 1], unit_t[:, 0]])
-
-    # Orient every normal to point away from the centroid (outward), so width stays uniform.
-    outward_sign = np.sign(np.sum(normal * (centerline - centroid), axis=1, keepdims=True))
-    outward_sign = np.where(outward_sign == 0, 1.0, outward_sign)
-    normal = normal * outward_sign
+    # Outward unit normal: the right-hand normal for a counter-clockwise loop, the left-hand one for
+    # a clockwise loop. Using the winding (not the centroid) keeps deep lobes/hairpins correct.
+    normal = np.column_stack([unit_t[:, 1], -unit_t[:, 0]])
+    if _polygon_area(centerline) < 0:
+        normal = -normal
 
     outer = centerline + half_width * normal
     inner = centerline - half_width * normal
@@ -61,6 +58,7 @@ def build_annulus_track(
     samples: int = 400,
     difficulty: str = "medium",
     scale: float = 1.0,
+    clockwise: bool = False,
 ) -> dict:
     if half_width <= 0:
         raise ValueError("half_width must be positive")
@@ -70,6 +68,9 @@ def build_annulus_track(
     dense = resample_closed(centerline, samples)
     # Ensure counter-clockwise so travel direction (increasing index) is consistent.
     if _polygon_area(dense) < 0:
+        dense = dense[::-1].copy()
+    if clockwise:
+        # Same shape driven the other way round: travel direction follows increasing index.
         dense = dense[::-1].copy()
 
     outer, inner = _constant_width_offsets(dense, half_width)

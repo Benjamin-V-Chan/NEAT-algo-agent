@@ -1,0 +1,55 @@
+# NEAT vs PPO comparison study (protocol: README "NEAT vs PPO").
+# One config drives both methods, so the environment, sensors, actions, rewards and budget are
+# identical by construction. Everything not listed uses the repo defaults (fatal walls, no noise).
+experiment:
+  name: neat_vs_ppo
+  description: "NEAT vs PPO: sample efficiency and generalization to unseen tracks"
+  seed: 1
+
+runtime:
+  max_generations: 100000   # NEAT is stopped by the env-step budget, not by generations
+  max_env_steps: 3000000    # shared budget: 3M env steps = 150k simulated car-seconds per run
+
+simulation:
+  dt: 0.05
+  max_steps_per_episode: 1800
+  track_file: tracks/baseline_loop.json
+  train_tracks:
+    - tracks/baseline_loop.json
+    - tracks/oval_speedway.json
+    - tracks/twisty_circuit.json
+    - tracks/serpentine_loop.json
+    - tracks/technical_coil.json
+
+neat:
+  population_size: 120
+
+ppo:
+  envs_per_track: 1
+  n_steps: 1024
+  batch_size: 256
+  n_epochs: 10
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  net_arch: [64, 64]
+  normalize_reward: true
+  torch_threads: 1
+
+study:
+  seeds: [1, 2, 3, 4, 5]
+  holdout_tracks:
+    - tracks/holdout/holdout_ripple.json
+    - tracks/holdout/holdout_kidney.json
+  eval_points: 30
+  eval_max_steps: 1800
+  max_parallel_runs: 10
+  output_root: outputs/study
+
+analysis:
+  enabled_post_train: true
+
+logging:
+  save_per_step: false
