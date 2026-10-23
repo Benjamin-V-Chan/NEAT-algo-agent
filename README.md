@@ -23,6 +23,8 @@ rebuilding the live visualization — which is why the more recent commits exist
 - Vectorized geometry: every car's ray sensors and wall collisions are resolved for the entire
   generation in a couple of batched numpy calls per tick
 - Post-run analysis and multi-run comparison tooling
+- A Gymnasium wrapper + stable-baselines3 PPO baseline on the identical environment, and a
+  NEAT-vs-PPO comparison study runnable from one command (see [NEAT vs PPO](#neat-vs-ppo))
 
 ## Project Layout
 ```text
@@ -30,14 +32,18 @@ neat_racer/
   analysis/       # run loaders, plots (incl. evolution/curriculum/trajectory), comparison
   evolution/      # NEAT config builder, curriculum fitness, trainer (serial + parallel eval)
   replay/         # saved-champion replay
+  rl/             # Gymnasium env wrapper (env.py) + stable-baselines3 PPO trainer (train_ppo.py)
   simulation/     # geometry, track, car dynamics, sensors, progress, termination,
                   #   track_builder (procedural tracks) + track_validator
+  study/          # NEAT-vs-PPO protocol: shared evaluation harness, runner, report
   telemetry/      # structured logging (CSV / Parquet) + schemas
   utils/          # seeds, filesystem, math helpers
   visualization/  # pygame renderer + HUD (optional) and a matplotlib track_plot
 configs/          # YAML experiment configs
 tracks/           # JSON tracks (baseline_loop, oval_speedway, twisty_circuit, serpentine_loop, technical_coil)
-tools/            # helper scripts (generate_tracks.py)
+  holdout/        # held-out evaluation-only tracks for the NEAT-vs-PPO study
+    hard/         # out-of-family held-out tier (clockwise / narrow), chosen by blinded calibration
+tools/            # generate_tracks.py, snap_track_gates.py, calibrate_holdouts.py
 outputs/          # timestamped run artifacts (auto-created, git-ignored)
 saved_artifacts/  # optional static artifacts storage
 tests/            # unit + smoke tests
@@ -57,7 +63,8 @@ Optional extras:
 ```bash
 pip install -e '.[viz]'            # live Pygame rendering (pygame-ce)
 pip install -e '.[parquet]'        # columnar per-step telemetry (pyarrow)
-pip install -e '.[dev]'            # pytest + ruff (+ viz + parquet) for development
+pip install -e '.[rl]'             # PPO baseline + NEAT-vs-PPO study (gymnasium, stable-baselines3, torch)
+pip install -e '.[dev]'            # pytest + ruff (+ viz + parquet + rl) for development
 ```
 
 > Rendering uses `pygame-ce`, the maintained community fork, which ships prebuilt wheels for
@@ -83,6 +90,13 @@ python main.py compare --runs outputs/run_a outputs/run_b --output-dir outputs/c
 
 # Batch across seeds (auto-compares at the end)
 python main.py batch --config configs/default_experiment.yaml --seeds 1 2 3 4
+
+# Train PPO on the same environment (single run; budget = runtime.max_env_steps)
+python main.py train-ppo --config configs/neat_vs_ppo.yaml --seed 1
+
+# Run the full NEAT-vs-PPO study, or rebuild its report
+python main.py study --config configs/neat_vs_ppo.yaml
+python main.py study-report --study-dir outputs/study/<timestamped_study>
 
 # Validate / visualize track files
 python main.py track --validate-all tracks
@@ -119,8 +133,8 @@ error**, so the config is self-documenting and typo-safe. Main sections:
 | Section       | Purpose |
 |---------------|---------|
 | `experiment`  | name, description, seed |
-| `runtime`     | mode, generation count, determinism, `num_workers` (parallel eval) |
-| `simulation`  | timestep, max episode steps, track file |
+| `runtime`     | mode, generation count, determinism, `num_workers` (parallel eval), `max_env_steps` budget |
+| `simulation`  | timestep, max episode steps, track file, optional multi-track `train_tracks` |
 | `car`         | kinematics, drag/steer limits, wall-contact speed retention |
 | `sensors`     | ray angles/range and the optional alignment feature |
 | `dynamics`    | optional realism (off by default): understeer, sensor noise, surface grip |
@@ -128,6 +142,8 @@ error**, so the config is self-documenting and typo-safe. Main sections:
 | `progress`    | checkpoint radius and lap sequencing rules |
 | `fitness`     | early/late weight sets and the curriculum blend target |
 | `neat`        | population size and genome hyperparameters |
+| `ppo`         | stable-baselines3 PPO hyperparameters |
+| `study`       | NEAT-vs-PPO protocol: seeds, held-out tracks, evaluation schedule |
 | `logging`     | output root and per-step telemetry toggles |
 | `rendering`   | window and overlay settings |
 | `analysis`    | post-train analysis behavior |
@@ -195,11 +211,129 @@ Each run creates `outputs/<timestamp>_<experiment>/` containing:
 - `replays/` — champion trajectory exports
 - `track_snapshot.png`
 
+## NEAT vs PPO
+A controlled comparison of NEAT against PPO (reinforcement learning, stable-baselines3) on this
+simulator. It asks two questions: which method learns faster per environment step, and which one
+generalizes better to tracks it never trained on.
+
+### Protocol
+The protocol was fixed before any run.
+- **Same environment.**
+  - `neat_racer/rl/env.py` is a single-car Gymnasium env that drives the same `CarAgent` the NEAT
+    loop uses. Physics, ray sensors, the 13-float observation, the action decoding, checkpoint/lap
+    rules and termination are all shared code.
+  - `tests/test_rl_env.py` asserts that observations, positions, rewards and the termination tick
+    match the NEAT path step for step when both are given the same actions.
+- **Same reward.**
+  - PPO's per-step reward is the NEAT per-step fitness increment, so an episode's undiscounted
+    return equals its NEAT fitness. The curriculum is the same scheduler, stepped per PPO rollout
+    instead of per generation.
+  - Deliberate differences: PPO discounts (γ = 0.99) and normalizes rewards, and the 1800-tick cap
+    is treated as a truncation.
+- **Same budget.**
+  - Each run gets 3,000,000 env steps, where 1 step is one simulated tick of one car (0.05 car-s).
+    NEAT is charged for every tick of every genome on every track.
+  - The final policy is the latest one trained on ≤ 3M steps: for NEAT, the champion of the last
+    generation that finished within budget; for PPO, the policy after the last whole rollout.
+  - Wall-clock time is logged too.
+- **Train/test split.**
+  - Training uses the 5 bundled tracks.
+  - Two held-out tiers are used only for evaluation:
+    - *in-family* (`tracks/holdout/`): 2 tracks from the same generator as the training tracks;
+    - *hard* (`tracks/holdout/hard/`): 4 out-of-family tracks. They are clockwise (every training
+      track runs counter-clockwise), and one is also narrower than any training track.
+  - The hard tracks were picked by a **blinded calibration** (`tools/calibrate_holdouts.py`).
+    Earlier final policies drove 8 candidates, only pooled completion was kept, and the 4
+    candidates closest to 50% were selected. This places them where the methods *can* differ,
+    without looking at which method does better.
+- **Seeds and settings.**
+  - Study 2 uses 10 seeds per method (Study 1 used 5).
+  - NEAT uses the repo's settings (population 120).
+  - PPO uses SB3 defaults with 5 envs (one per training track), 1024 steps per env per rollout, and
+    batch size 256.
+  - Neither side was tuned for the study.
+- **Pre-registered primary tests** (Study 2):
+  - P1 is train lap-completion AUC (sample efficiency).
+  - P2 is hard held-out lap completion (generalization).
+  - Each uses an exact Mann-Whitney test, Holm-corrected. A method "wins" only if the adjusted
+    p < 0.05.
+- **Metrics.**
+  - Lap completion rate, best and median lap time, crash rate, and progress, on training and on
+    held-out tracks.
+  - Learning curves of those metrics against env steps, with 95% t-bands over seeds.
+  - Each evaluation runs the policy deterministically for 1800-tick episodes, through the same
+    evaluation function for both methods. Curve points use one nominal start per track. Final
+    policies are evaluated from 5 fixed start conditions per track.
+
+### Results — Study 2 (`outputs/study/20261023_071745_neat_vs_ppo_v2/`)
+| final policies, mean over 10 seeds | NEAT | PPO | PPO − NEAT (95% CI) | Holm p |
+|---|---|---|---|---|
+| **P1** Train lap-completion AUC (sample efficiency) | 0.912 | 0.933 | 0.021 ± 0.021 | **0.020** |
+| **P2** Hard held-out lap completion | 0.390 | 0.595 | 0.205 ± 0.337 | 0.126 |
+| In-family held-out lap completion | 1.00 | 1.00 | — | — |
+| Hard held-out crash rate | 0.66 | 0.46 | — | — |
+| Median env steps until all 5 train tracks lapped | 401,657 | 102,400 | — | — |
+
+**Conclusion.**
+- *Learning speed: PPO wins.* The effect is small: it is pre-registered and significant after Holm
+  correction. PPO laps every training track after a median of about 100k env steps, against about
+  400k for NEAT. Both sit at the ceiling after about 1M steps.
+- *Generalization: no detectable difference.* PPO's point estimate is higher on the hard
+  clockwise tracks (0.60 vs 0.39). However, outcomes vary hugely between seeds, and the 95% CI on
+  the difference runs from −0.13 to +0.54.
+  - The test did discriminate: pooled hard-tier completion is about 0.49, not at ceiling or floor.
+  - On in-family held-out tracks both methods are perfect.
+- *A descriptive trend.* PPO's hard-tier performance peaks around 500k steps (0.98 from the nominal
+  start) and decays to 0.65 by 3M while its training score stays at 1.00. It looks like
+  specialization to counter-clockwise travel.
+- *Wall-clock.* NEAT is about 2× cheaper per env step in this implementation. Study 2 ran 14 jobs
+  at once on a 15-core machine, so its absolute timings are contention-bound and are not quoted.
+
+Figures are `figures/learning_curves.png` and `figures/learning_curves_wallclock.png` in the study
+directory, next to `results.md` with the per-track tables.
+
+### Study 1 (superseded)
+Study 1 (`outputs/study/20261023_063532_neat_vs_ppo/`, 5 seeds) found a tie:
+- AUC 0.75 vs 0.79, p = 0.85.
+- Both methods at 1.00 on the in-family held-out tracks.
+
+It could not discriminate, for two reasons:
+- **`baseline_loop.json` was defective.** Its checkpoint gates did not span the corridor, so a car
+  on the outer line lapped at full speed without crossing them and was killed by the stagnation
+  rule. That defect explained every training-side difference. The gates are now snapped wall to
+  wall (`tools/snap_track_gates.py`), and the track validator rejects such layouts.
+- **The held-out tracks were too easy.** Study 2 fixes both problems.
+
+### Reproduce
+```bash
+pip install -e '.[rl]'
+python main.py study --config configs/neat_vs_ppo_v2.yaml   # Study 2: 20 runs, ~2 h with 14 in parallel
+python main.py study --config configs/neat_vs_ppo.yaml      # Study 1: 10 runs, ~17 min
+python main.py study-report --study-dir outputs/study/<timestamped_study>   # re-render tables and figures
+```
+`study` trains every (method, seed) run, evaluates them on the step schedule, and writes the
+following into `outputs/study/<timestamp>_<name>/`:
+- `results.md`, including the pre-registered primary-test table
+- the CSV tables
+- the figures
+- per-run directories in the usual telemetry format, so `analyze` and `compare` work on PPO runs
+  too
+
+Rerunning `configs/neat_vs_ppo.yaml` now uses the fixed `baseline_loop`, so it will not reproduce
+Study 1's numbers exactly.
+
 ## Extending
 - **Tracks** — drop a JSON file in `tracks/` (see `tracks/baseline_loop.json` for the schema), or
   generate one procedurally from a centerline with `neat_racer.simulation.track_builder` (see
-  `tools/generate_tracks.py`). Validate/visualize any track with `python main.py track`. Bundled
+  `tools/generate_tracks.py`; `build_annulus_track(..., clockwise=True)` builds the mirror-direction
+  circuit). Validate/visualize any track with `python main.py track`. Bundled
   tracks: `baseline_loop`, `oval_speedway`, `twisty_circuit`, `serpentine_loop`, `technical_coil`.
+  - The validator rejects any checkpoint or start/finish gate that stops more than one collision
+    radius short of a wall. A car could drive around such a gate, never earn progress, and be killed
+    by the stagnation rule.
+  - For a hand-drawn track, `python tools/snap_track_gates.py tracks/<file>.json` stretches every
+    gate wall to wall along its own line. `--recenter-centerline` additionally rebuilds the alignment
+    centerline from the gate midpoints.
 - **Observations** — add features in `simulation/sensors.py`
 - **Dynamics** — adjust the model/constraints in `simulation/car.py`
 - **Reward shaping** — edit `evolution/fitness.py`

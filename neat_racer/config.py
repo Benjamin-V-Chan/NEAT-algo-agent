@@ -26,6 +26,10 @@ class RuntimeSection:
     # episodes are deterministic given their inputs, so results match the serial
     # path for the default (noise-free) model.
     num_workers: int = 1
+    # Training budget in environment steps (one simulated tick of one car). 0 = no step budget
+    # (NEAT runs max_generations). NEAT stops starting new generations once it is reached; PPO
+    # trains for the largest whole number of rollouts that fits inside it.
+    max_env_steps: int = 0
 
 
 @dataclass(slots=True)
@@ -33,6 +37,9 @@ class SimulationSection:
     dt: float = 0.05
     max_steps_per_episode: int = 2000
     track_file: str = "tracks/baseline_loop.json"
+    # Optional multi-track training set. Empty = train on track_file only. NEAT scores each genome
+    # by its mean fitness over these tracks; PPO pins one vectorized env to each track.
+    train_tracks: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -143,6 +150,51 @@ class NeatSection:
 
 
 @dataclass(slots=True)
+class PpoSection:
+    # stable-baselines3 PPO hyperparameters. SB3 defaults except n_steps / batch_size.
+    envs_per_track: int = 1
+    n_steps: int = 1024
+    batch_size: int = 256
+    n_epochs: int = 10
+    learning_rate: float = 3e-4
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_range: float = 0.2
+    ent_coef: float = 0.0
+    vf_coef: float = 0.5
+    max_grad_norm: float = 0.5
+    log_std_init: float = 0.0
+    net_arch: list[int] = field(default_factory=lambda: [64, 64])
+    normalize_reward: bool = True
+    torch_threads: int = 1
+
+
+@dataclass(slots=True)
+class StudySection:
+    # NEAT-vs-PPO comparison protocol (see README). The training budget is runtime.max_env_steps
+    # and the training tracks are simulation.train_tracks.
+    seeds: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
+    holdout_tracks: list[str] = field(default_factory=list)
+    # Out-of-family held-out tier (narrower, clockwise, hairpins). Scored as its own split.
+    hard_holdout_tracks: list[str] = field(default_factory=list)
+    eval_points: int = 30
+    eval_max_steps: int = 1800
+    # Start conditions per track: start 0 is the nominal spawn; the rest shift the car along the
+    # start line (up to start_lateral_jitter x the line's half-length) and turn it (up to
+    # start_heading_jitter_deg), drawn from start_seed so every policy faces the same starts.
+    curve_eval_starts: int = 1
+    final_eval_starts: int = 1
+    start_lateral_jitter: float = 0.4
+    start_heading_jitter_deg: float = 10.0
+    start_seed: int = 0
+    # Pre-registered primary comparisons: final_by_seed.csv columns compared NEAT vs PPO with an
+    # exact Mann-Whitney test, Holm-corrected across this list.
+    primary_metrics: list[str] = field(default_factory=list)
+    max_parallel_runs: int = 10
+    output_root: str = "outputs/study"
+
+
+@dataclass(slots=True)
 class LoggingSection:
     output_root: str = "outputs"
     save_per_step: bool = False
@@ -188,6 +240,8 @@ class ExperimentConfig:
     progress: ProgressSection = field(default_factory=ProgressSection)
     fitness: FitnessSection = field(default_factory=FitnessSection)
     neat: NeatSection = field(default_factory=NeatSection)
+    ppo: PpoSection = field(default_factory=PpoSection)
+    study: StudySection = field(default_factory=StudySection)
     logging: LoggingSection = field(default_factory=LoggingSection)
     rendering: RenderingSection = field(default_factory=RenderingSection)
     analysis: AnalysisSection = field(default_factory=AnalysisSection)
@@ -260,3 +314,21 @@ def _validate_config(cfg: ExperimentConfig) -> None:
         raise ConfigError("dynamics.sensor_noise_std must be non-negative")
     if cfg.dynamics.max_lateral_accel <= 0:
         raise ConfigError("dynamics.max_lateral_accel must be positive")
+    if cfg.runtime.max_env_steps < 0:
+        raise ConfigError("runtime.max_env_steps must be >= 0")
+    if min(cfg.ppo.envs_per_track, cfg.ppo.n_steps, cfg.ppo.batch_size, cfg.ppo.n_epochs) < 1:
+        raise ConfigError("ppo.envs_per_track, n_steps, batch_size and n_epochs must be >= 1")
+    if not 0.0 < cfg.ppo.gamma <= 1.0:
+        raise ConfigError("ppo.gamma must be in (0, 1]")
+    if min(cfg.study.eval_points, cfg.study.eval_max_steps, cfg.study.max_parallel_runs) < 1:
+        raise ConfigError("study.eval_points, eval_max_steps and max_parallel_runs must be >= 1")
+    if min(cfg.study.curve_eval_starts, cfg.study.final_eval_starts) < 1:
+        raise ConfigError("study.curve_eval_starts and final_eval_starts must be >= 1")
+    if not 0.0 <= cfg.study.start_lateral_jitter < 1.0:
+        raise ConfigError("study.start_lateral_jitter must be in [0, 1)")
+    if not cfg.study.seeds:
+        raise ConfigError("study.seeds must not be empty")
+
+
+def training_track_files(cfg: ExperimentConfig) -> list[str]:
+    return list(cfg.simulation.train_tracks) or [cfg.simulation.track_file]

@@ -217,3 +217,5 @@ notes/
 docs/
 CLAUDE.md
 *.local.md
+*.md
+!README.md

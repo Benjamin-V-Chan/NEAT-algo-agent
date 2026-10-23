@@ -19,6 +19,9 @@ GENERATION_SUMMARY_COLUMNS = [
     "best_connections",
     "mean_nodes",
     "mean_connections",
+    # Cumulative training cost: env steps (one tick of one car) and training wall time.
+    "env_steps",
+    "wall_time_sec",
 ]
 
 PER_CAR_SUMMARY_COLUMNS = [
@@ -42,6 +45,7 @@ PER_CAR_SUMMARY_COLUMNS = [
     "steering_var",
     "steering_jerk",
     "throttle_var",
+    "track_id",
 ]
 
 PER_STEP_COLUMNS = [

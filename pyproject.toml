@@ -24,7 +24,12 @@ dependencies = [
 viz = ["pygame-ce>=2.5"]
 # Columnar per-step telemetry (Parquet). Falls back to CSV when absent.
 parquet = ["pyarrow>=15.0"]
-dev = ["pytest>=8.0", "ruff>=0.5", "pyarrow>=15.0", "pygame-ce>=2.5"]
+# PPO baseline + NEAT-vs-PPO study (Gymnasium env wrapper, stable-baselines3, torch).
+rl = ["gymnasium>=1.0", "stable-baselines3>=2.3", "torch>=2.3"]
+dev = [
+  "pytest>=8.0", "ruff>=0.5", "pyarrow>=15.0", "pygame-ce>=2.5",
+  "gymnasium>=1.0", "stable-baselines3>=2.3", "torch>=2.3",
+]
 
 [project.scripts]
 neat-racer = "neat_racer.cli:main"

@@ -37,6 +37,26 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--seeds", nargs="+", type=int, required=True)
     batch.add_argument("--live", action="store_true")
 
+    train_ppo = sub.add_parser("train-ppo", help="Train a PPO agent (stable-baselines3) on the same environment")
+    train_ppo.add_argument("--config", type=Path, default=Path("configs/neat_vs_ppo.yaml"))
+    train_ppo.add_argument("--seed", type=int, default=None)
+    train_ppo.add_argument("--budget", type=int, default=None, help="Override runtime.max_env_steps")
+    train_ppo.add_argument("--no-analysis", action="store_true")
+
+    study = sub.add_parser("study", help="Run the NEAT-vs-PPO comparison study end to end")
+    study.add_argument("--config", type=Path, default=Path("configs/neat_vs_ppo.yaml"))
+    study.add_argument("--seeds", nargs="+", type=int, default=None, help="Override study.seeds")
+    study.add_argument("--budget", type=int, default=None, help="Override runtime.max_env_steps")
+    study.add_argument("--name", type=str, default=None, help="Override experiment.name (study dir suffix)")
+    study.add_argument("--methods", nargs="+", choices=["neat", "ppo"], default=["neat", "ppo"])
+
+    study_report = sub.add_parser("study-report", help="Rebuild figures/tables for an existing study dir")
+    study_report.add_argument("--study-dir", type=Path, required=True)
+    study_report.add_argument(
+        "--exclude-track", nargs="+", default=[], metavar="TRACK_ID",
+        help="Post-hoc: re-score without these track ids into a posthoc_excluding_* subdir",
+    )
+
     track = sub.add_parser("track", help="Validate or render track files")
     track.add_argument("--validate", type=Path, metavar="FILE", help="Validate a single track file")
     track.add_argument("--validate-all", type=Path, metavar="DIR", help="Validate every *.json in DIR")
@@ -100,6 +120,36 @@ def cmd_batch(args: argparse.Namespace) -> list[Path]:
     compare_out.mkdir(parents=True, exist_ok=True)
     compare_runs([str(r) for r in run_dirs], output_path=str(compare_out))
     return run_dirs
+
+
+def cmd_train_ppo(args: argparse.Namespace) -> Path:
+    from neat_racer.rl.train_ppo import PpoTrainer
+
+    cfg = load_experiment_config(args.config)
+    if args.seed is not None:
+        cfg.experiment.seed = args.seed
+    if args.budget is not None:
+        cfg.runtime.max_env_steps = args.budget
+    cfg.experiment.name = f"ppo_{cfg.experiment.name}"
+    seed_everything(cfg.experiment.seed)
+
+    result = PpoTrainer(cfg).run()
+    if cfg.analysis.enabled_post_train and not args.no_analysis:
+        analyze_run(result.run_dir)
+    return result.run_dir
+
+
+def cmd_study(args: argparse.Namespace) -> Path:
+    from neat_racer.study.runner import run_study
+
+    cfg = load_experiment_config(args.config)
+    if args.seeds is not None:
+        cfg.study.seeds = list(args.seeds)
+    if args.budget is not None:
+        cfg.runtime.max_env_steps = args.budget
+    if args.name is not None:
+        cfg.experiment.name = args.name
+    return run_study(cfg, methods=tuple(args.methods))
 
 
 def cmd_track(args: argparse.Namespace) -> int:
@@ -175,6 +225,22 @@ def main() -> int:
     if args.command == "batch":
         runs = cmd_batch(args)
         print(f"Batch complete. Runs: {[str(r) for r in runs]}")
+        return 0
+
+    if args.command == "train-ppo":
+        run_dir = cmd_train_ppo(args)
+        print(f"PPO training complete. Run dir: {run_dir}")
+        return 0
+
+    if args.command == "study":
+        study_dir = cmd_study(args)
+        print(f"Study complete. Results: {study_dir / 'results.md'}")
+        return 0
+
+    if args.command == "study-report":
+        from neat_racer.study.report import build_report
+
+        build_report(args.study_dir, exclude_tracks=tuple(args.exclude_track))
         return 0
 
     if args.command == "track":

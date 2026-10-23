@@ -7,7 +7,7 @@ import numpy as np
 from neat_racer.simulation.geometry import point_in_polygon, segment_intersection
 from neat_racer.simulation.track import Track
 
-__all__ = ["Issue", "validate_track", "has_errors", "format_issues"]
+__all__ = ["Issue", "validate_track", "has_errors", "format_issues", "corridor_span", "gate_wall_gaps"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,41 @@ def _self_intersects(polygon: np.ndarray) -> bool:
             if hit:
                 return True
     return False
+
+
+def corridor_span(track: Track, a: np.ndarray, b: np.ndarray) -> tuple[float, float] | None:
+    a = np.asarray(a, dtype=float)
+    d = np.asarray(b, dtype=float) - a
+    seg_a, seg_b = track.wall_arrays
+    e = seg_b - seg_a
+    denom = d[0] * e[:, 1] - d[1] * e[:, 0]
+    ok = np.abs(denom) > 1e-12
+    diff = seg_a - a
+    t = np.where(ok, (diff[:, 0] * e[:, 1] - diff[:, 1] * e[:, 0]) / np.where(ok, denom, 1.0), np.nan)
+    u = np.where(ok, (diff[:, 0] * d[1] - diff[:, 1] * d[0]) / np.where(ok, denom, 1.0), np.nan)
+    cuts = np.unique(t[ok & (u >= 0.0) & (u <= 1.0)])
+    best, best_overlap = None, 0.0
+    for t0, t1 in zip(cuts[:-1], cuts[1:], strict=True):
+        if t1 - t0 < 1e-9 or not track.is_inside_corridor(a + d * (t0 + t1) * 0.5):
+            continue
+        overlap = min(t1, 1.0) - max(t0, 0.0)
+        if overlap > best_overlap:
+            best, best_overlap = (float(t0), float(t1)), overlap
+    return best
+
+
+def gate_wall_gaps(track: Track) -> list[tuple[str, float, float]]:
+    gates = [(f"checkpoint {i}", a, b) for i, (a, b) in enumerate(track.checkpoints)]
+    gates.append(("start/finish", *track.start_finish))
+    out = []
+    for name, a, b in gates:
+        span = corridor_span(track, a, b)
+        if span is None:
+            out.append((name, np.inf, np.inf))
+            continue
+        length = float(np.linalg.norm(np.asarray(b, dtype=float) - np.asarray(a, dtype=float)))
+        out.append((name, max(0.0, -span[0]) * length, max(0.0, span[1] - 1.0) * length))
+    return out
 
 
 def validate_track(track: Track, *, collision_radius: float = 7.5) -> list[Issue]:
@@ -80,6 +115,15 @@ def validate_track(track: Track, *, collision_radius: float = 7.5) -> list[Issue
             warning(f"checkpoint {i} midpoint is outside the corridor")
     if not track.is_inside_corridor(track.start_center):
         warning("start/finish midpoint is outside the corridor")
+
+    # Gates must span the corridor wall-to-wall. If a gate stops short of a wall by more than the
+    # car's collision radius, a car can drive past it without crossing it and never earn progress.
+    for name, gap_a, gap_b in gate_wall_gaps(track):
+        gap = max(gap_a, gap_b)
+        if gap > collision_radius:
+            error(f"{name} stops {gap:.1f} px short of a wall (car can bypass it)")
+        elif gap > 0.5:
+            warning(f"{name} stops {gap:.1f} px short of a wall")
 
     centerline = track.metadata.get("centerline")
     if centerline:
